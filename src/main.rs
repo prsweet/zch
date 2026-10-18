@@ -274,7 +274,7 @@ fn run_tui() -> color_eyre::Result<()> {
  *   main     — UI + event loop (owns all state)
  *   listener — Competitive Companion HTTP server (:10043)
  *   runner   — compiles + runs test cases
- *   submitter— Safari submission automation (CF / AtCoder)
+ *   submitter— Safari submission automation (Codeforces)
  *
  * Workers never talk to each other; everything flows through `main_tx`.
  */

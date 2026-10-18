@@ -1,40 +1,31 @@
-<div align="center">
-  <h1>🚀 ZCH </h1>
-  <p><strong>A blazing-fast TUI dashboard for competitive programming in the <a href="https://zed.dev/">Zed</a> editor on macOS.</strong></p>
+# 🚀 ZCH
 
-  [![macOS](https://img.shields.io/badge/os-macOS-black?style=flat-square&logo=apple)](#)
-  [![Rust](https://img.shields.io/badge/rust-2024-orange?style=flat-square&logo=rust)](#)
-  [![Zed](https://img.shields.io/badge/Editor-Zed-blue?style=flat-square)](#)
-  [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](#)
-</div>
+**A blazing-fast TUI dashboard for competitive programming in the [Zed](https://zed.dev/) editor on macOS.**
 
-<br>
+[![macOS](https://img.shields.io/badge/os-macOS-black?style=flat-square&logo=apple)](#)
+[![Rust](https://img.shields.io/badge/rust-2024-orange?style=flat-square&logo=rust)](#)
+[![Zed](https://img.shields.io/badge/Editor-Zed-blue?style=flat-square)](#)
 
-A single Rust binary that runs everything locally. It intercepts problems from the [Competitive Companion](https://github.com/jmerle/competitive-companion) browser extension, writes your template with the URL header, stores sample tests in a hidden database, compiles and runs every test with precise timings, and submits to **Codeforces** and **AtCoder** via Safari automation while streaming the live verdict — all from one TUI.
-
-The original Python implementation is kept at `main.py` for reference.
+A single Rust binary that receives problems from the [Competitive Companion](https://github.com/jmerle/competitive-companion) extension, runs your samples with precise timings, and submits to **Codeforces** via Safari automation — all from one local TUI.
 
 ---
 
 ## ✨ Features
 
-* 🖥️ **Live TUI dashboard** — working directory bar, message console, per-case result cards, and a centered footer that always shows every key.
-* ✔️ **Instant verdict cards** — each test case gets a chip (`✔ AC · 4ms`, `✘ WA`, `⏱ TLE`, `✘ RE`, `✘ CE`) and auto-collapses on AC. On WA the **Got** box shows exactly what your program printed, with the characters that sit somewhere other than the expected character at that position marked in red — missing characters are never invented.
-* 📥 **Auto-parses problems** — Competitive Companion payloads are captured on `127.0.0.1:10043`; the file is created from your boilerplate with a `// URL:` header and opened in Zed automatically.
-* 🧱 **Smart boilerplate injection** — your template from `~/.zch/boilerplate.cpp` (falls back to the repo default). No test comments in your code; tests live in `~/.zch/.tc/<Problem>.json`.
-* ⚡ **Blazing fast execution** — compiles once, replays all cases with 1ms polling, per-case timing, and hard TLE kills. Binaries older than 24h are pruned automatically.
-* 🤖 **One-key submissions** — a confirmation modal shows every detail (platform, problem ID, URL, language, browser, local tests) before submitting to Codeforces / AtCoder via Safari automation. Submissions run fully async — several can be in flight at once, each tracked in its own **Submissions bar** row (`⠹ submitting → ✔ ACCEPTED`) with an animated spinner, so run output in the console never overwrites them; the bar shows the latest 4 and scrolls internally with the mouse wheel through the last 20; `zch submit` does the same in its own terminal tab. The submission's Safari tab is tagged and tracked by URL (Safari exposes no tab id), so opening or closing other tabs never misreports it. If you close the Safari tab mid-flight, the submission is marked **INTERRUPTED** (after a ~20s grace period that tolerates transient hiccups) instead of hanging, and a verdict that never arrives ends as **TIMED OUT** rather than a bare `WAIT`. If a CAPTCHA blocks the page, the submission's Safari window is raised automatically with a notification alert so you can solve it in place.
+* 🖥️ **Live TUI dashboard** — directory bar, message console, verdict cards, and a footer that always shows every key.
+* ✔️ **Instant verdicts** — each test case gets a chip (`✔ AC · 4ms`, `✘ WA`, `⏱ TLE`, `✘ RE`, `✘ CE`) and auto-collapses on AC; on WA the **Got** box marks the exact characters that differ in red.
+* 📥 **Auto-parses problems** — payloads are captured on `127.0.0.1:10043`; the file is created from `~/.zch/boilerplate.cpp` with a `// URL:` header, tests live in `~/.zch/.tc/`, and the file opens in Zed automatically.
+* ⚡ **Blazing fast execution** — compile once, replay every case with 1ms polling, per-case timing, and hard TLE kills.
+* 🤖 **One-key Codeforces submissions** — a confirmation modal shows every detail, then async verdicts stream into the **Submissions bar** (`⠹ submitting → ✔ ACCEPTED`); Safari tabs are tracked by URL (**INTERRUPTED** / **TIMED OUT** handled) and CAPTCHAs raise the window automatically. `zch submit` works from the terminal too.
 * 🎛️ **Command palette from Zed** — Zed tasks drive the running TUI over HTTP (`send r`, `send s`, …) with the active `${ZED_FILE}`.
-* 📁 **Live directory switching** — press `d` for the console: `cd <path>`, `ls`, `pwd`, with TAB path completion that walks nested paths level by level (`cd cp/q` ⇥ `cp/questions/`). New problems are saved wherever you point it.
-* 🧩 **Multi-language** — C++17/20/23 (default C++23), Python 3, Java. Language + extra compile flags are configured in the built-in config menu (`c`) and persisted to `~/.zch/config.json`.
-* 🧱 **Zero sandboxing limits** — native binary, no WASM/network restrictions.
+* 📁 **Live directory switching** — `cd`, `ls`, `pwd` console with TAB path completion; new problems are saved wherever you point it.
+* 🧩 **Multi-language** — C++17/20/23, Python 3, Java; language + flags persist in `~/.zch/config.json` via the `c` menu.
 
 ---
 
 ## 📋 Prerequisites
 
 - **macOS** *(relies on native Apple Events for Safari automation)*
-- **Rust toolchain** (`cargo`) *(optional — only if building from source)*
 - A **Nerd Font** in your terminal (e.g. JetBrainsMono Nerd Font) so the file/folder icons render the same on every machine.
 - **Safari** with **"Allow JavaScript from Apple Events"** enabled:
   - `Safari` → `Settings` → `Advanced` → check `"Show features for web developers"`
@@ -58,35 +49,15 @@ The original Python implementation is kept at `main.py` for reference.
 brew install prsweet/tap/zch
 ```
 
-**Or the one-liner** — no Rust toolchain needed, installs to `~/.local/bin`:
+**Or:**
 
 ```bash
 curl -fsSL https://github.com/prsweet/zch/releases/latest/download/zch-installer.sh | sh
 ```
 
-**From source** (requires the Rust toolchain):
-
-```bash
-git clone https://github.com/prsweet/zch.git
-cd zch
-cargo build --release
-cp target/release/zch ~/.local/bin/
-```
-
-### 2. Add your boilerplate (optional)
-
-```bash
-cp boilerplate.cpp ~/.zch/boilerplate.cpp   # then edit to taste
-```
-
-`~/.zch/` holds everything: `boilerplate.cpp`, `config.json`, `.tc/` (test cases), `.bin/` (compiled binaries). Anything from the old `~/.zed-cp-helper/` folder is migrated automatically on first run.
-
-### 3. Setup Zed tasks
+### 2. Setup Zed tasks
 
 Append to `~/.config/zed/tasks.json` (press `cmd+shift+R` to spawn tasks):
-
-<details>
-<summary><strong>Click to view the <code>tasks.json</code> configuration</strong></summary>
 
 ```json
 [
@@ -107,34 +78,17 @@ Append to `~/.config/zed/tasks.json` (press `cmd+shift+R` to spawn tasks):
     "hide": "always"
   },
   {
-    "label": "CP: Submit to Codeforces / AtCoder",
+    "label": "CP: Submit to Codeforces",
     "command": "zch submit \"${ZED_FILE}\"",
     "use_new_terminal": true,
     "allow_concurrent_runs": true,
     "reveal": "always",
     "hide": "never"
-  },
-  {
-    "label": "CP: Add Custom Test Case",
-    "command": "zch send a \"${ZED_FILE}\"",
-    "use_new_terminal": false,
-    "allow_concurrent_runs": false,
-    "reveal": "never",
-    "hide": "always"
-  },
-  {
-    "label": "CP: Edit Test Cases",
-    "command": "zch send e \"${ZED_FILE}\"",
-    "use_new_terminal": false,
-    "allow_concurrent_runs": false,
-    "reveal": "never",
-    "hide": "always"
   }
 ]
 ```
-</details>
 
-### 4. Optimize your keymap
+### 3. Optimize your keymap
 
 Add to `~/.config/zed/keymap.json`:
 
@@ -144,9 +98,7 @@ Add to `~/.config/zed/keymap.json`:
     "context": "Editor",
     "bindings": {
       "cmd-'": ["task::Spawn", { "task_name": "CP: Run Tests" }],
-      "cmd-enter": ["task::Spawn", { "task_name": "CP: Submit to Codeforces / AtCoder" }],
-      "cmd-alt-a": ["task::Spawn", { "task_name": "CP: Add Custom Test Case" }],
-      "cmd-alt-e": ["task::Spawn", { "task_name": "CP: Edit Test Cases" }]
+      "cmd-enter": ["task::Spawn", { "task_name": "CP: Submit to Codeforces" }]
     }
   },
   {
@@ -168,7 +120,7 @@ Press **`cmd-r`** inside your problems folder (or run `zch` in a terminal). Drag
 
 ### 2. Receive a problem
 
-Click the **Competitive Companion** extension on any Codeforces / AtCoder problem page. The file is created in the current directory, saved to the test database, and opened in Zed automatically.
+Click the **Competitive Companion** extension on any Codeforces problem page. The file is created in the current directory, saved to the test database, and opened in Zed automatically.
 
 ### 3. Test & submit from the TUI
 
@@ -177,7 +129,7 @@ Click the **Competitive Companion** extension on any Codeforces / AtCoder proble
 | `r` | compile & run all test cases |
 | `a` | add a custom test case |
 | `e` | edit existing test cases |
-| `s` | submit to Codeforces / AtCoder (confirmation modal → Enter submits / Backspace cancels) |
+| `s` | submit to Codeforces (confirmation modal → Enter submits / Backspace cancels) |
 | `d` | console: `cd <path>` · `ls` · `pwd` (TAB completes paths) |
 | `c` | config: language + extra compile flags |
 | `q` | quit |
@@ -188,14 +140,11 @@ While editing, `Tab` switches between **Input** / **Expected** (and wraps to the
 
 * **Run (`cmd-'`)** — asks the running TUI to load `${ZED_FILE}` and run it.
 * **Submit (`cmd-enter`)** — opens a dedicated terminal tab that shows every submission detail (platform, problem ID, URL, language, browser, local tests) and waits for **`Enter`** to submit or **`Backspace`** to cancel. The verdict (and any CAPTCHA warning) streams into that tab.
-* **Add / Edit `(cmd-alt-a / cmd-alt-e)`** — jump straight into editing the case list for the current file.
 
 The `send` subcommand talks to the TUI over HTTP, while `submit` runs standalone in its own terminal:
 
 ```bash
 zch send r /path/to/Problem.cpp   # run
-zch send e /path/to/Problem.cpp   # edit cases
-zch send a /path/to/Problem.cpp   # add case
 zch send s /path/to/Problem.cpp   # submit (confirmation modal inside the TUI)
 zch submit /path/to/Problem.cpp   # submit here (Enter/Backspace prompt, -y to skip)
 ```
@@ -206,41 +155,7 @@ Set `ZCH_PORT` to run on a different port than `10043`.
 
 ## 🛡️ Dealing with CAPTCHAs
 
-Platforms like AtCoder and Codeforces occasionally use invisible CAPTCHAs. When automation hits one, the TUI alerts you (`⚠ CAPTCHA — solve it, submission continues automatically`) and Safari foregrounds itself. Solve it, and the live verdict polling resumes on its own.
-
----
-
-## 💡 Pro-tips for maximum performance
-
-### 1. Drop execution latency to 3-4ms ⚡
-macOS security scans (`syspolicyd`) add ~200ms of lag when running newly compiled binaries. Fix:
-1. **System Settings** → **Privacy & Security** → **Developer Tools**: add **Zed** and your terminal emulator, toggle them **ON**.
-2. Add the same under **Full Disk Access**.
-
-![macOS Settings](macos_developer_tools_settings.png)
-
-### 2. Ultra-fast precompiled headers (PCH) 🔥
-Compiling `#include <bits/stdc++.h>` costs 1.5s–3.0s per compile. A PCH drops this **under 0.20s**.
-
-**For Clang (macOS default):**
-```bash
-clang++ -std=c++23 -O2 -x c++-header /usr/local/include/bits/stdc++.h -o /usr/local/include/bits/stdc++.h.pch
-```
-Then open the config menu (`c`) and add to **extra compile flags**:
-```
--include-pch /usr/local/include/bits/stdc++.h.pch
-```
-The flag is appended to `g++ -std=c++23 -O2 -Wall -Wextra …` for every compile.
-
-### 3. Fast policy-based data structures (PBDS) on Clang 🌲
-Apple Clang doesn't ship bits/stdc++.h or PBDS. The [cp_with_clang](https://github.com/prsweet/cp_with_clang.git) helper repo sets up both for Apple Clang.
-
-### 4. Sync templates between Zed and VS Code
-Keep one snippet file via a symlink:
-```bash
-ln -sf "$HOME/Library/Application Support/Code/User/snippets/cpp.json" ~/.config/zed/snippets/c++.json
-```
-Name your main snippet exactly `boilerplate`.
+Codeforces occasionally serves an invisible CAPTCHA. When automation hits one, the TUI alerts you (`⚠ CAPTCHA — solve it, submission continues automatically`) and Safari foregrounds itself. Solve it, and the live verdict polling resumes on its own.
 
 ---
 
@@ -265,3 +180,40 @@ src/
 ```
 
 Everything runs on one channel: the UI thread owns all state, and the receiver / runner / submitter workers only exchange `PassingCommand` envelopes with it — no worker holds a handle to another.
+
+---
+
+## 💡 Pro-tips for maximum performance
+
+![zch running a test case in 1ms](sample.png)
+
+### 1. Drop execution latency to 3-4ms ⚡
+
+macOS security scans (`syspolicyd`) add ~200ms of lag when running newly compiled binaries. Fix:
+
+1. **System Settings** → **Privacy & Security** → **Developer Tools**: add **Zed** and your terminal emulator, toggle them **ON**.
+2. Add the same under **Full Disk Access**.
+
+![macOS Settings — Developer Tools and Full Disk Access](macos_developer_tools_settings.png)
+
+### 2. Ultra-fast precompiled headers (PCH) 🔥
+
+Compiling `#include <bits/stdc++.h>` costs 1.5s–3.0s per compile. A PCH drops this **under 0.20s**.
+
+**For Clang (macOS default):**
+
+```bash
+clang++ -std=c++23 -O2 -x c++-header /usr/local/include/bits/stdc++.h -o /usr/local/include/bits/stdc++.h.pch
+```
+
+Then open the config menu (`c`) and add to **extra compile flags**:
+
+```
+-include-pch /usr/local/include/bits/stdc++.h.pch
+```
+
+The flag is appended to `g++ -std=c++23 -O2 -Wall -Wextra …` for every compile.
+
+### 3. Fast policy-based data structures (PBDS) on Clang 🌲
+
+Apple Clang doesn't ship bits/stdc++.h or PBDS. The [std-with-pbds](https://github.com/prsweet/std-with-pbds.git) helper repo sets up both for Apple Clang.

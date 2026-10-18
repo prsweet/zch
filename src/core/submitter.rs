@@ -101,15 +101,14 @@ fn plan(config: &SubmitConfig) -> Result<(SubmissionInfo, Platform), AppError> {
     };
 
     let platform = detect_platform(&url).ok_or(AppError::UnsupportedPlatform(url))?;
-    let is_cf = platform.submit_url.contains("codeforces.com");
     let language = config.language;
 
     let info = SubmissionInfo {
-        platform: if is_cf { "Codeforces" } else { "AtCoder" },
+        platform: "Codeforces",
         submit_url: platform.submit_url.clone(),
         problem_code: platform.problem_code.clone(),
         language: language.label(),
-        language_id: if is_cf { language.cf_id() } else { language.ac_id() },
+        language_id: language.cf_id(),
         file_name: config
             .file_path
             .file_name()
@@ -164,20 +163,6 @@ fn detect_platform(url: &str) -> Option<Platform> {
                     submit_url: format!("{origin}/problemset/submit"),
                     problem_code: format!("{id}{index}"),
                     ready_selector: "select[name=\"programTypeId\"]",
-                });
-            }
-        return None;
-    }
-
-    if host == "atcoder.jp" {
-        if let Some(i) = segments.iter().position(|s| *s == "contests")
-            && segments.get(i + 2) == Some(&"tasks")
-                && let (Some(contest), Some(task)) = (segments.get(i + 1), segments.get(i + 3))
-            {
-                return Some(Platform {
-                    submit_url: format!("https://atcoder.jp/contests/{contest}/submit"),
-                    problem_code: task.to_string(),
-                    ready_selector: "select[name=\"data.TaskScreenName\"]",
                 });
             }
         return None;
@@ -280,90 +265,6 @@ const CF_RESULT_JS: &str = r#"(function() {
         }
         if (url.indexOf('/my') > -1 || url.indexOf('/status') > -1) return 'RELOAD: Waiting for submission';
         if (url.indexOf('/submit') > -1) return 'WAIT';
-        return 'WAIT';
-    } catch(e) { return 'WAIT'; }
-})();"#;
-
-const AC_FILL_JS: &str = r#"(function() {
-    try {
-        var code = atob('__CODE_B64__');
-
-        // 1. Select the problem from the task dropdown
-        var taskSelect = document.querySelector('select[name="data.TaskScreenName"]');
-        if (taskSelect) {
-            var target = '__PROBLEM_CODE__'.toLowerCase();
-            for (var i = 0; i < taskSelect.options.length; i++) {
-                if (taskSelect.options[i].value.toLowerCase() === target) {
-                    taskSelect.value = taskSelect.options[i].value;
-                    taskSelect.dispatchEvent(new Event('change', {bubbles: true}));
-                    try { $(taskSelect).trigger('change'); } catch(e) {}
-                    break;
-                }
-            }
-        }
-
-        // 2. Select language
-        var langSelects = document.querySelectorAll('select[name="data.LanguageId"]');
-        for (var s = 0; s < langSelects.length; s++) {
-            var sel = langSelects[s];
-            if (sel.offsetParent === null && langSelects.length > 1) continue;
-            for (var i = 0; i < sel.options.length; i++) {
-                if (sel.options[i].value === '__LANG_ID__') {
-                    sel.value = '__LANG_ID__';
-                    sel.dispatchEvent(new Event('change', {bubbles: true}));
-                    try { $(sel).trigger('change'); } catch(e) {}
-                    break;
-                }
-            }
-        }
-
-        // 3. Inject code into the editor
-        setTimeout(function() {
-            var ta = document.querySelector('#sourceCode, textarea[name="sourceCode"], textarea.plain-textarea');
-            if (ta) { ta.value = code; ta.dispatchEvent(new Event('input', {bubbles: true})); }
-            try {
-                var editors = document.querySelectorAll('.ace_editor');
-                if (editors.length > 0) {
-                    var lastEd = editors[editors.length - 1];
-                    if (typeof ace !== 'undefined') ace.edit(lastEd).setValue(code, -1);
-                }
-            } catch(e) {}
-
-            // 4. Click submit
-            var btn = document.querySelector('#submit, input[type="submit"], button[type="submit"]');
-            if (btn) btn.click();
-        }, 800);
-
-        return 'SUBMITTED';
-    } catch(e) { return 'ERROR: ' + e.message; }
-})();"#;
-
-const AC_RESULT_JS: &str = r#"(function() {
-    try {
-        if (document.readyState !== 'complete') return 'WAIT';
-        var url = document.location.href;
-
-        // Still on submit page? Check for error banner
-        if (url.indexOf('/submit') > -1) {
-            var errorBanner = document.querySelector('.alert-danger, .alert.alert-danger, div.error');
-            if (errorBanner) return 'CAPTCHA';
-            return 'WAIT';
-        }
-
-        // Check for submission table rows
-        var rows = document.querySelectorAll('table.table-bordered tbody tr');
-        if (rows.length > 0) {
-            var verdictSpan = rows[0].querySelector('span.label');
-            if (verdictSpan) {
-                var vt = verdictSpan.textContent.trim();
-                if (vt === 'WJ' || vt === 'WR' || vt.indexOf('Judging') > -1 || vt.indexOf('/') > -1) {
-                    return 'RELOAD: ' + vt;
-                }
-                return 'RESULT: ' + vt;
-            }
-        }
-
-        if (url.indexOf('/submissions') > -1) return 'RELOAD: Waiting for results';
         return 'WAIT';
     } catch(e) { return 'WAIT'; }
 })();"#;
@@ -599,8 +500,6 @@ fn tracking(submit_url: &str) -> (String, String, &'static str) {
         .to_string();
     if submit_url.ends_with("/problemset/submit") {
         (prefix.clone(), format!("{prefix}status?my=on"), "/status")
-    } else if submit_url.contains("atcoder.jp") {
-        (prefix.clone(), format!("{prefix}submissions/me"), "/submissions")
     } else {
         (prefix.clone(), format!("{prefix}my"), "/my")
     }
@@ -654,29 +553,16 @@ pub fn submit(
         .map_err(|e| AppError::Io(format!("cannot read {}: {e}", config.file_path.display())))?;
 
     let language = config.language;
-    let is_cf = platform.submit_url.contains("codeforces.com");
-    let lang_id = if is_cf { language.cf_id() } else { language.ac_id() };
+    let lang_id = language.cf_id();
 
     let clean_code = strip_metadata(&code);
     let code_b64 = BASE64.encode(clean_code.as_bytes());
 
-    let (fill_js, result_js) = if is_cf {
-        (
-            CF_FILL_JS
-                .replace("__CODE_B64__", &code_b64)
-                .replace("__LANG_ID__", lang_id)
-                .replace("__PROBLEM_CODE__", &platform.problem_code.to_uppercase()),
-            CF_RESULT_JS.to_string(),
-        )
-    } else {
-        (
-            AC_FILL_JS
-                .replace("__CODE_B64__", &code_b64)
-                .replace("__LANG_ID__", lang_id)
-                .replace("__PROBLEM_CODE__", &platform.problem_code),
-            AC_RESULT_JS.to_string(),
-        )
-    };
+    let fill_js = CF_FILL_JS
+        .replace("__CODE_B64__", &code_b64)
+        .replace("__LANG_ID__", lang_id)
+        .replace("__PROBLEM_CODE__", &platform.problem_code.to_uppercase());
+    let result_js = CF_RESULT_JS.to_string();
 
     notify(format!(
         "Submitting {} as {} to {}",
@@ -787,15 +673,9 @@ mod tests {
     }
 
     #[test]
-    fn detects_atcoder() {
-        let p = detect_platform("https://atcoder.jp/contests/abc452/tasks/abc452_c").unwrap();
-        assert_eq!(p.submit_url, "https://atcoder.jp/contests/abc452/submit");
-        assert_eq!(p.problem_code, "abc452_c");
-    }
-
-    #[test]
-    fn rejects_unknown_platforms() {
+    fn rejects_unsupported_platforms() {
         assert!(detect_platform("https://example.com/problem/1").is_none());
+        assert!(detect_platform("https://atcoder.jp/contests/abc452/tasks/abc452_c").is_none());
     }
 
     #[test]
@@ -808,7 +688,7 @@ mod tests {
     }
 
     #[test]
-    fn derives_tracking_urls_per_platform() {
+    fn derives_tracking_urls() {
         let (prefix, results, mark) = tracking("https://codeforces.com/contest/2266/submit");
         assert_eq!(prefix, "https://codeforces.com/contest/2266/");
         assert_eq!(results, "https://codeforces.com/contest/2266/my");
@@ -818,11 +698,6 @@ mod tests {
         assert_eq!(prefix, "https://codeforces.com/problemset/");
         assert_eq!(results, "https://codeforces.com/problemset/status?my=on");
         assert_eq!(mark, "/status");
-
-        let (prefix, results, mark) = tracking("https://atcoder.jp/contests/abc452/submit");
-        assert_eq!(prefix, "https://atcoder.jp/contests/abc452/");
-        assert_eq!(results, "https://atcoder.jp/contests/abc452/submissions/me");
-        assert_eq!(mark, "/submissions");
     }
 
     #[test]

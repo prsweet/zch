@@ -2,7 +2,28 @@ use std::{fs, path::{Path, PathBuf}, time::{SystemTime, UNIX_EPOCH}};
 
 use crate::{core::{ActiveProblem, Language, UserConfig}, error::AppError};
 
-const DEFAULT_CPP_BOILERPLATE: &str = include_str!("../../boilerplate.cpp");
+const DEFAULT_CPP_BOILERPLATE: &str = r#"#include <bits/stdc++.h>
+using namespace std;
+#define all(x) (x).begin(), (x).end()
+#define rall(x) (x).rbegin(), (x).rend()
+#define int long long
+
+void solve()
+{
+    
+}
+
+signed main()
+{
+    ios_base::sync_with_stdio(false);
+    cin.tie(nullptr);
+    cout.tie(nullptr);
+
+    int tt = 1;
+    // cin >> tt;
+    while (tt--) solve();
+}
+"#;
 const DEFAULT_PY_BOILERPLATE: &str =
     "import sys\n\n\ndef solve():\n    pass\n\n\nif __name__ == \"__main__\":\n    solve()\n";
 const DEFAULT_JAVA_BOILERPLATE: &str = "import java.util.*;\nimport java.io.*;\n\npublic class __CLASS__ {\n    public static void main(String[] args) {\n        Scanner sc = new Scanner(System.in);\n    }\n}\n";

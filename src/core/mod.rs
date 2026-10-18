@@ -88,16 +88,6 @@ impl Language {
         }
     }
 
-    /// Submit language id on AtCoder.
-    pub fn ac_id(&self) -> &'static str {
-        match self {
-            Language::Cpp17 | Language::Cpp20 => "5001",
-            Language::Cpp23 => "5002",
-            Language::Python => "5055",
-            Language::Java => "5005",
-        }
-    }
-
     pub fn next(&self) -> Language {
         let idx = Self::ALL.iter().position(|l| l == self).unwrap_or(0);
         Self::ALL[(idx + 1) % Self::ALL.len()]
