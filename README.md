@@ -98,17 +98,20 @@ Add to `~/.config/zed/keymap.json`:
     "context": "Editor",
     "bindings": {
       "cmd-'": ["task::Spawn", { "task_name": "CP: Run Tests" }],
-      "cmd-enter": ["task::Spawn", { "task_name": "CP: Submit to Codeforces" }]
+      "cmd-enter": ["task::Spawn", { "task_name": "CP: Submit to Codeforces" }],
+      "cmd-r": ["workspace::SendKeystrokes", "cmd-alt-shift-r cmd-\\"]
     }
   },
   {
     "context": "Workspace",
     "bindings": {
-      "cmd-r": ["task::Spawn", { "task_name": "CP: Start Listener (Current Folder)" }]
+      "cmd-alt-shift-r": ["task::Spawn", { "task_name": "CP: Start Listener (Current Folder)" }]
     }
   }
 ]
 ```
+
+The `cmd-r` macro spawns the dashboard in the center pane and then splits the pane right (`cmd-\` is Zed's built-in *Split Right*), so the TUI lands beside your code — no dock settings touched.
 
 ---
 
@@ -116,7 +119,7 @@ Add to `~/.config/zed/keymap.json`:
 
 ### 1. Start the TUI
 
-Press **`cmd-r`** inside your problems folder (or run `zch` in a terminal). Drag the tab to the right side of your screen for a split-editor layout. The dashboard listens on `127.0.0.1:10043`.
+Press **`cmd-r`** inside your problems folder (or run `zch` in a terminal). The keymap macro opens the dashboard split to the right of your editor; it listens on `127.0.0.1:10043`.
 
 ### 2. Receive a problem
 
