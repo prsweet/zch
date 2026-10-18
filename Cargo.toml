@@ -1,6 +1,6 @@
 [package]
 name = "zch"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2024"
 repository = "https://github.com/prsweet/zch"
 description = "TUI dashboard for competitive programming: receive problems, run tests, and submit to Codeforces"
