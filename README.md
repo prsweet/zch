@@ -194,8 +194,6 @@ macOS security scans (`syspolicyd`) add ~200ms of lag when running newly compile
 1. **System Settings** → **Privacy & Security** → **Developer Tools**: add **Zed** and your terminal emulator, toggle them **ON**.
 2. Add the same under **Full Disk Access**.
 
-![macOS Settings — Developer Tools and Full Disk Access](macos_developer_tools_settings.png)
-
 ### 2. Ultra-fast precompiled headers (PCH) 🔥
 
 Compiling `#include <bits/stdc++.h>` costs 1.5s–3.0s per compile. A PCH drops this **under 0.20s**.
