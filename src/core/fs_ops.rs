@@ -60,15 +60,15 @@ impl FsOps {
         this
     }
 
+    /// v1-compatible problem naming: spaces and dots become `_`, any other
+    /// punctuation is dropped, everything else is kept as-is (no collapsing),
+    /// so `A. ADjacent` -> `A__ADjacent` exactly like the v1 `.testcases` era.
     pub fn sanitize_name(name: &str) -> String {
-        let mut clean: String = name
+        let clean: String = name
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+            .map(|c| if c == ' ' || c == '.' { '_' } else { c })
+            .filter(|c| c.is_alphanumeric() || *c == '_')
             .collect();
-        while clean.contains("__") {
-            clean = clean.replace("__", "_");
-        }
-        let clean = clean.trim_matches('_').to_string();
         if clean.is_empty() { "problem".to_string() } else { clean }
     }
 
