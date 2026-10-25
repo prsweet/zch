@@ -1,4 +1,9 @@
-use std::{path::PathBuf, sync::mpsc::Sender, thread};
+use std::{
+    path::PathBuf,
+    sync::mpsc::{Sender, channel},
+    thread,
+    time::Duration,
+};
 
 use tiny_http::{Method, Response, Server};
 
@@ -6,6 +11,8 @@ use crate::core::{
     ActiveProblem, HelperCommand, RunAction,
     PassingCommand::{self, ToHelper},
 };
+
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Listener port, overridable with `ZCH_PORT` (default 10043).
 pub fn listen_port() -> u16 {
@@ -33,27 +40,43 @@ pub fn spawn_server(tx: Sender<PassingCommand>) {
             let mut body = String::new();
             let _ = request.as_reader().read_to_string(&mut body);
 
-            if request.method() == &Method::Post {
+            let (status, message) = if request.method() == &Method::Post {
                 match serde_json::from_str::<ActiveProblem>(&body) {
                     Ok(problem) => {
                         let _ = tx.send(ToHelper(HelperCommand::New(problem)));
+                        (200, "problem received".to_string())
                     }
                     Err(e) => {
-                        let _ = tx.send(ToHelper(HelperCommand::Error(format!(
-                            "malformed problem payload: {e}"
-                        ))));
+                        let message = format!("malformed problem payload: {e}");
+                        let _ = tx.send(ToHelper(HelperCommand::Error(message.clone())));
+                        (400, message)
                     }
                 }
             } else {
-                handle_command_url(&url, &tx);
-            }
+                match handle_command_url(&url) {
+                    Some((action, file)) => {
+                        let (reply_tx, reply_rx) = channel();
+                        let _ = tx.send(ToHelper(HelperCommand::Command {
+                            file,
+                            action,
+                            reply: reply_tx,
+                        }));
+                        match reply_rx.recv_timeout(COMMAND_TIMEOUT) {
+                            Ok(Ok(message)) => (200, message),
+                            Ok(Err(error)) => (400, error),
+                            Err(_) => (504, "the TUI did not answer in time".to_string()),
+                        }
+                    }
+                    None => (400, "unknown command".to_string()),
+                }
+            };
 
-            let _ = request.respond(Response::empty(200));
+            let _ = request.respond(Response::from_string(message).with_status_code(status));
         }
     });
 }
 
-fn handle_command_url(url: &str, tx: &Sender<PassingCommand>) {
+fn handle_command_url(url: &str) -> Option<(RunAction, Option<PathBuf>)> {
     let (path, query) = match url.split_once('?') {
         Some((path, query)) => (path, Some(query)),
         None => (url, None),
@@ -82,9 +105,7 @@ fn handle_command_url(url: &str, tx: &Sender<PassingCommand>) {
         _ => {}
     }
 
-    if let Some(action) = action {
-        let _ = tx.send(ToHelper(HelperCommand::Command { file, action }));
-    }
+    action.map(|action| (action, file))
 }
 
 fn parse_action(raw: &str) -> Option<RunAction> {

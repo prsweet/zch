@@ -72,6 +72,85 @@ impl FsOps {
         if clean.is_empty() { "problem".to_string() } else { clean }
     }
 
+    /// The stem used for this problem's `.json`, binary, and source file.
+    ///
+    /// Sanitized names alone are not unique: `A. Sum` exists in every contest,
+    /// so two problems would share (and overwrite) the same state. When the
+    /// plain stem already belongs to a different URL, append a short stable
+    /// hash of that URL. Re-receiving the same problem reuses its suffix.
+    pub fn claim_problem_stem(&self, name: &str, url: &str, code_dir: &Path) -> String {
+        let base = Self::sanitize_name(name);
+
+        // Anonymous payloads have no URL to tell them apart, so a second task
+        // with the same name must get its own numbered stem rather than
+        // overwriting the first. Two different anonymous tasks are not
+        // duplicates, even when their names match.
+        if url.is_empty() {
+            if !self.stem_taken(&base, code_dir) {
+                return base;
+            }
+            for counter in 2.. {
+                let candidate = format!("{base}__{counter}");
+                if !self.stem_taken(&candidate, code_dir) {
+                    return candidate;
+                }
+            }
+        }
+
+        if !self.stem_conflicts(&base, url, code_dir) {
+            return base;
+        }
+
+        let suffix = short_hash(url);
+        let candidate = format!("{base}__{suffix}");
+        if !self.stem_conflicts(&candidate, url, code_dir) {
+            return candidate;
+        }
+
+        // Same URL hash but a different stored problem (should be impossible
+        // unless files were copied by hand): keep looking for a free slot.
+        for counter in 2.. {
+            let candidate = format!("{base}__{suffix}_{counter}");
+            if !self.stem_conflicts(&candidate, url, code_dir) {
+                return candidate;
+            }
+        }
+        unreachable!()
+    }
+
+    fn stem_taken(&self, stem: &str, code_dir: &Path) -> bool {
+        if self.tc_dir.join(format!("{stem}.json")).exists()
+            || self.binary_dir.join(stem).exists()
+            || code_dir.join(format!("{stem}.class")).exists()
+        {
+            return true;
+        }
+        ["cpp", "py", "java"]
+            .iter()
+            .any(|ext| code_dir.join(format!("{stem}.{ext}")).exists())
+    }
+
+    fn stem_conflicts(&self, stem: &str, url: &str, code_dir: &Path) -> bool {
+        let json = self.tc_dir.join(format!("{stem}.json"));
+        if json.exists() {
+            return match self.load_problem_by_stem(stem) {
+                Ok(problem) => problem.url != url,
+                // A corrupt/foreign file is not ours to overwrite.
+                Err(_) => true,
+            };
+        }
+
+        for ext in ["cpp", "py", "java"] {
+            let source = code_dir.join(format!("{stem}.{ext}"));
+            if let Some(existing) = source_url(&source)
+                && existing != url
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     fn ensure_default_boilerplate(&self) {
         let path = self.root_dir.join("boilerplate.cpp");
         if !path.exists() {
@@ -194,19 +273,45 @@ impl FsOps {
     pub fn load_config(&self) -> (UserConfig, bool) {
         let file_path = self.root_dir.join("config.json");
         if let Ok(file) = fs::read_to_string(&file_path)
-            && let Ok(parsed) = serde_json::from_str::<UserConfig>(&file) {
+            && let Ok(mut parsed) = serde_json::from_str::<UserConfig>(&file) {
+                parsed.normalize();
                 return (parsed, true);
             }
-        (UserConfig::default(), false)
+        let mut config = UserConfig::default();
+        config.normalize();
+        (config, false)
     }
 
     pub fn save_config(&self, config: &UserConfig) -> bool {
         let file_path = self.root_dir.join("config.json");
-        match serde_json::to_string_pretty(config) {
+        let mut config = config.clone();
+        config.normalize();
+        match serde_json::to_string_pretty(&config) {
             Ok(content) => fs::write(file_path, content).is_ok(),
             Err(_) => false,
         }
     }
+}
+
+/// Stable across runs (unlike `DefaultHasher`), so a problem keeps its suffix.
+fn short_hash(input: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in input.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{:08x}", hash & 0xffff_ffff)
+}
+
+/// The `// URL:` / `# URL:` header written into generated source files.
+fn source_url(path: &Path) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    content.lines().take(3).find_map(|line| {
+        line.strip_prefix("// URL: ")
+            .or_else(|| line.strip_prefix("# URL: "))
+            .map(str::trim)
+            .map(str::to_string)
+    })
 }
 
 /// One-time move from the old `~/.zed-cp-helper` layout (best effort).

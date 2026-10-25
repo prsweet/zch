@@ -33,16 +33,11 @@ pub fn render(frame: &mut Frame, area: Rect, spinner: &str, tick: i64, port: u16
         Line::from(vec![
             Span::styled(format!("{spinner} "), Style::new().fg(theme::CYAN)),
             Span::styled(format!("listening on 127.0.0.1:{port}"), Style::new().fg(theme::CYAN)),
-            Span::styled(
-                " — send a problem with Competitive Companion",
-                Style::new().fg(theme::MUTED),
-            ),
         ]),
         Line::from(vec![
             Span::styled(version, Style::new().fg(theme::BORDER)),
-            Span::styled("  ·  ", Style::new().fg(theme::BORDER)),
             Span::styled(
-                "[a]dd case   [r]un   [d]irectory   [c]onfig   [q]uit",
+                " — send a problem with Competitive Companion",
                 Style::new().fg(theme::MUTED),
             ),
         ]),

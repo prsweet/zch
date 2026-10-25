@@ -1,40 +1,173 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use ratatui::{
     Frame,
-    crossterm::event::{Event, KeyCode, MouseEventKind},
+    crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind},
     layout::{Alignment, Position, Rect, Constraint::{Length, Min, Percentage}, Layout},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, Clear, Paragraph, Scrollbar, ScrollbarState},
 };
 
 use crate::{
     components::{
+        ScrollbarDrag,
         block,
         config::ConfigMenu,
         dir_terminal::DirTerminal,
         splash::render,
+        step_wrapped,
         tc_list::TestCaseList,
-        testcase::{CaseVerdict, TestCase},
+        testcase::{
+            ActiveBox, CaseFocus, CaseVerdict, GOT_PAGE_LINES, PAGED_OUTPUT_NOTE, PaneKind,
+            STDERR_MARKER, TestCase,
+        },
         theme,
     },
     core::{
-        ActiveProblem, HelperCommand,
+        ActiveProblem, HelperCommand, ReceivingTestCase,
         PassingCommand::{self, ToHelper, ToRunner, ToSubmitter},
         RunnerCommand, RunAction, SubmitConfig, SubmitterCommand, Verdict,
         fs_ops::FsOps,
         submitter::{self, SubmissionInfo},
     },
 };
-use throbber_widgets_tui::{Throbber, ThrobberState};
+use throbber_widgets_tui::ThrobberState;
 
 pub enum InputMode {
     Normal,
     Editing,
+    DeleteSelect,
+    ConfirmDelete,
     Directory,
     Config,
     ConfirmSubmit,
+}
+
+enum DialogContent {
+    Lines(Vec<Line<'static>>),
+    Paged {
+        case_index: usize,
+        version: u64,
+        line_count: usize,
+        page_start: usize,
+        page: Vec<Line<'static>>,
+        warning: bool,
+    },
+}
+
+impl DialogContent {
+    fn total_lines(&self) -> usize {
+        match self {
+            Self::Lines(lines) => lines.len(),
+            Self::Paged { line_count, warning, .. } => line_count + usize::from(*warning),
+        }
+    }
+
+    fn max_width(&self) -> usize {
+        match self {
+            Self::Lines(lines) => lines.iter().map(Line::width).max().unwrap_or(0),
+            Self::Paged { page, warning, page_start, .. } => {
+                let warning_width = if *warning && *page_start == 0 {
+                    Line::from(PAGED_OUTPUT_NOTE).width()
+                } else {
+                    0
+                };
+                page.iter()
+                    .map(Line::width)
+                    .chain(std::iter::once(warning_width))
+                    .max()
+                    .unwrap_or(0)
+            }
+        }
+    }
+}
+
+struct PaneDialog {
+    title: String,
+    case_index: usize,
+    pane: PaneKind,
+    content: DialogContent,
+    scroll: usize,
+    h_scroll: usize,
+    viewport: u16,
+    viewport_width: u16,
+    v_scroll_area: Rect,
+    v_scroll_drag: Option<ScrollbarDrag>,
+    h_scroll_area: Rect,
+    h_scroll_drag: Option<ScrollbarDrag>,
+    color: Color,
+}
+
+#[cfg(test)]
+impl PaneDialog {
+    fn visible_lines(&self) -> &[Line<'static>] {
+        match &self.content {
+            DialogContent::Lines(lines) => lines,
+            DialogContent::Paged { page, .. } => page,
+        }
+    }
+
+    fn total_lines(&self) -> usize {
+        self.content.total_lines()
+    }
+}
+
+fn paged_warning_line(text: &'static str) -> Line<'static> {
+    Line::from(Span::styled(text, Style::new().fg(theme::YELLOW).bold()))
+}
+
+fn sync_paged_page(content: &mut DialogContent, tc_list: &TestCaseList, scroll: usize) {
+    let DialogContent::Paged {
+        case_index,
+        page_start,
+        page,
+        warning,
+        ..
+    } = content
+    else {
+        return;
+    };
+    let warning_rows = usize::from(*warning);
+    let file_scroll = scroll.saturating_sub(warning_rows);
+    let wanted = (file_scroll / GOT_PAGE_LINES) * GOT_PAGE_LINES;
+    if *page_start != wanted {
+        *page = tc_list
+            .testcases
+            .get(*case_index)
+            .map(|tc| tc.got_page_lines(wanted, GOT_PAGE_LINES))
+            .unwrap_or_default();
+        *page_start = wanted;
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RunRefusal {
+    AlreadyRunning,
+    NoProblem,
+}
+
+impl RunRefusal {
+    fn message(self) -> &'static str {
+        match self {
+            Self::AlreadyRunning => "already running — wait for the verdicts",
+            Self::NoProblem => "no active problem — receive one or open a file via a Zed task",
+        }
+    }
+
+    fn color(self) -> Color {
+        match self {
+            Self::AlreadyRunning => theme::YELLOW,
+            Self::NoProblem => theme::RED,
+        }
+    }
 }
 
 pub struct Submission {
@@ -71,6 +204,13 @@ pub struct Helper {
     throbber: ThrobberState,
     submission_scroll: usize,
     submissions_area: Rect,
+    submissions_scrollbar_area: Rect,
+    submissions_scrollbar_drag: Option<ScrollbarDrag>,
+    last_compile: Option<String>,
+    run_cancel: Arc<AtomicBool>,
+    run_started: Option<Instant>,
+    pane_dialog: Option<PaneDialog>,
+    last_pane_click: Option<(Instant, usize, PaneKind)>,
 }
 
 impl Helper {
@@ -101,6 +241,13 @@ impl Helper {
             throbber: ThrobberState::default(),
             submission_scroll: 0,
             submissions_area: Rect::default(),
+            submissions_scrollbar_area: Rect::default(),
+            submissions_scrollbar_drag: None,
+            last_compile: None,
+            run_cancel: Arc::new(AtomicBool::new(false)),
+            run_started: None,
+            pane_dialog: None,
+            last_pane_click: None,
         }
     }
 
@@ -127,7 +274,7 @@ impl Helper {
         let area = frame.area();
 
         let master_border = block(Some(" ZCH "))
-            .border_style(theme::ACCENT)
+            .border_style(theme::MUTED)
             .title_style(Style::new().fg(theme::ACCENT).bold());
         let main_area = master_border.inner(area);
         frame.render_widget(master_border, area);
@@ -146,17 +293,24 @@ impl Helper {
         self.dir_terminal
             .draw_input(frame, chunks[0], matches!(self.input_mode, InputMode::Directory));
 
-        if self.tc_list.testcases.is_empty() {
-            render(
-                frame,
-                chunks[1],
-                self.spinner(),
-                self.throbber.index() as i64,
-                crate::core::receiver::listen_port(),
-            );
-        } else {
-            self.tc_list
-                .draw(frame, chunks[1], matches!(self.input_mode, InputMode::Editing));
+        let list_area = chunks[1];
+        if list_area.width > 0 && list_area.height > 0 {
+            if self.tc_list.testcases.is_empty() {
+                render(
+                    frame,
+                    list_area,
+                    self.spinner(),
+                    self.throbber.index() as i64,
+                    crate::core::receiver::listen_port(),
+                );
+            } else {
+                let focus = match self.input_mode {
+                    InputMode::Editing => CaseFocus::Edit,
+                    InputMode::DeleteSelect | InputMode::ConfirmDelete => CaseFocus::Delete,
+                    _ => CaseFocus::None,
+                };
+                self.tc_list.draw(frame, list_area, focus);
+            }
         }
 
         self.draw_submissions(frame, chunks[2]);
@@ -165,16 +319,22 @@ impl Helper {
 
         match self.input_mode {
             InputMode::Config => {
-                let dim_bg = Block::default().style(Style::new().add_modifier(Modifier::DIM));
-                frame.render_widget(dim_bg, area);
+                dim_area(frame, area);
                 self.config_menu.draw(frame, area);
             }
             InputMode::ConfirmSubmit => {
-                let dim_bg = Block::default().style(Style::new().add_modifier(Modifier::DIM));
-                frame.render_widget(dim_bg, area);
+                dim_area(frame, area);
                 self.draw_submit_modal(frame, area);
             }
+            InputMode::ConfirmDelete => {
+                dim_area(frame, area);
+                self.draw_delete_modal(frame, area);
+            }
             _ => {}
+        }
+
+        if self.pane_dialog.is_some() {
+            self.draw_pane_dialog(frame, area);
         }
     }
 
@@ -186,24 +346,47 @@ impl Helper {
         }
     }
 
-    /// Wheel scrolling inside the submissions panel (hovered area only).
-    fn scroll_submissions(&mut self, down: bool) {
-        let viewport = if self.submissions_area.height >= 3 {
+    fn submissions_viewport(&self) -> usize {
+        if self.submissions_area.height >= 3 {
             self.submissions_area.height.saturating_sub(2) as usize
         } else {
             SUBMISSION_VIEWPORT
-        };
-        let max_scroll = self.submissions.len().saturating_sub(viewport);
+        }
+    }
+
+    fn submissions_max_scroll(&self) -> usize {
+        self.submissions.len().saturating_sub(self.submissions_viewport())
+    }
+
+    /// Wheel scrolling inside the submissions panel (hovered area only).
+    fn scroll_submissions(&mut self, down: bool) {
+        let max_scroll = self.submissions_max_scroll();
         if down {
             self.submission_scroll = (self.submission_scroll + 1).min(max_scroll);
         } else {
             self.submission_scroll = self.submission_scroll.saturating_sub(1);
         }
+        self.submissions_scrollbar_drag = None;
+    }
+
+    fn begin_submissions_scrollbar_drag(&mut self, position: Position) {
+        if let Some((drag, scroll)) = ScrollbarDrag::begin(
+            self.submissions_scrollbar_area,
+            true,
+            self.submissions_max_scroll(),
+            self.submission_scroll,
+            position,
+        ) {
+            self.submissions_scrollbar_drag = Some(drag);
+            self.submission_scroll = scroll;
+        }
     }
 
     fn draw_submissions(&mut self, frame: &mut Frame, area: Rect) {
         self.submissions_area = area;
+        self.submissions_scrollbar_area = Rect::default();
         if area.height < 3 {
+            self.submissions_scrollbar_drag = None;
             return;
         }
 
@@ -219,6 +402,10 @@ impl Helper {
         } else {
             (area, Rect::default())
         };
+        self.submissions_scrollbar_area = scrollbar_area;
+        if !needs_scrollbar {
+            self.submissions_scrollbar_drag = None;
+        }
 
         let spinner = self.spinner();
         let lines: Vec<Line> = self
@@ -276,6 +463,7 @@ impl Helper {
             InputMode::Normal => {
                 for (i, (k, label)) in [
                     ("a", "add case"),
+                    ("x", "del"),
                     ("r", "run"),
                     ("e", "edit"),
                     ("s", "submit"),
@@ -291,6 +479,11 @@ impl Helper {
                     }
                     spans.push(key(k));
                     spans.push(hint(&format!(" {label}")));
+                }
+                if self.running {
+                    spans.push(hint("  "));
+                    spans.push(key("Esc"));
+                    spans.push(hint(" cancel"));
                 }
             }
             InputMode::Editing => {
@@ -308,6 +501,31 @@ impl Helper {
                 spans.push(key("Esc"));
                 spans.push(hint(" save & back"));
             }
+            InputMode::DeleteSelect => {
+                spans.push(badge(
+                    &format!(
+                        "DELETE CASE {} / {}",
+                        self.tc_list.active_area + 1,
+                        self.tc_list.testcases.len()
+                    ),
+                    theme::RED,
+                ));
+                spans.push(hint("   "));
+                spans.push(key("Tab/Shift+Tab"));
+                spans.push(hint(" select case   "));
+                spans.push(key("Enter"));
+                spans.push(hint(" confirm   "));
+                spans.push(key("Esc"));
+                spans.push(hint(" cancel"));
+            }
+            InputMode::ConfirmDelete => {
+                spans.push(badge("CONFIRM DELETE", theme::RED));
+                spans.push(hint("   "));
+                spans.push(key("Enter"));
+                spans.push(hint(" delete   "));
+                spans.push(key("Backspace"));
+                spans.push(hint(" back"));
+            }
             InputMode::Directory => {
                 spans.push(badge("CONSOLE", theme::CYAN));
                 spans.push(hint("   cd <path>   ls   pwd   "));
@@ -323,6 +541,10 @@ impl Helper {
                 spans.push(hint(" next field   "));
                 spans.push(key("←/→"));
                 spans.push(hint(" language   "));
+                spans.push(key("Enter"));
+                spans.push(hint(" add   "));
+                spans.push(key("x"));
+                spans.push(hint(" delete   "));
                 spans.push(key("Esc"));
                 spans.push(hint(" save & close"));
             }
@@ -336,44 +558,8 @@ impl Helper {
             }
         }
 
-        let footer_area = if self.busy() {
-            let in_flight = self.submissions.iter().filter(|s| !s.done).count();
-            let label = match (self.running, in_flight) {
-                (true, 0) => " running tests…".to_string(),
-                (false, n) => format!(" {n} submission{} in flight…", if n == 1 { "" } else { "s" }),
-                (true, n) => format!(
-                    " running tests · {n} submission{} in flight…",
-                    if n == 1 { "" } else { "s" }
-                ),
-            };
-            let width = label.chars().count() as u16 + 2;
-            let chunks = Layout::horizontal([Min(0), Length(width)]).split(area);
-            let busy_area = chunks[1];
-
-            let throbber = Throbber::default()
-                .throbber_set(throbber_widgets_tui::BRAILLE_EIGHT)
-                .throbber_style(Style::new().fg(theme::CYAN))
-                .use_type(throbber_widgets_tui::WhichUse::Spin);
-            frame.render_stateful_widget(
-                throbber,
-                Rect { width: 1, ..busy_area },
-                &mut self.throbber,
-            );
-            frame.render_widget(
-                Paragraph::new(Span::styled(label, Style::new().fg(theme::CYAN).italic())),
-                Rect {
-                    x: busy_area.x + 1,
-                    width: busy_area.width.saturating_sub(1),
-                    ..busy_area
-                },
-            );
-            chunks[0]
-        } else {
-            area
-        };
-
         let footer = Paragraph::new(Line::from(spans)).alignment(Alignment::Center);
-        frame.render_widget(footer, footer_area);
+        frame.render_widget(footer, area);
     }
 
     fn draw_submit_modal(&self, frame: &mut Frame, area: Rect) {
@@ -415,7 +601,7 @@ impl Helper {
             format!("{} — not installed!", info.browser)
         };
         let rows: Vec<Line> = vec![
-            row("Problem", problem_name, Color::Reset),
+            row("Problem", problem_name, theme::TEXT),
             row("File", info.file_name.clone(), theme::CYAN),
             row("Platform", info.platform.to_string(), theme::YELLOW),
             row("Problem ID", info.problem_code.clone(), theme::ORANGE),
@@ -423,7 +609,7 @@ impl Helper {
             row(
                 "Language",
                 format!("{}  (id {})", info.language, info.language_id),
-                theme::GREEN,
+                theme::TEXT,
             ),
             row(
                 "Browser",
@@ -444,7 +630,75 @@ impl Helper {
             ]),
         ];
 
-        let body = Paragraph::new(rows).block(Block::default().padding(ratatui::widgets::Padding::symmetric(1, 0)));
+        let body = Paragraph::new(rows)
+            .block(Block::default().padding(ratatui::widgets::Padding::symmetric(1, 0)));
+        frame.render_widget(body, inner);
+    }
+
+    fn draw_delete_modal(&self, frame: &mut Frame, area: Rect) {
+        let total = self.tc_list.testcases.len();
+        let Some(tc) = self.tc_list.testcases.get(self.tc_list.active_area) else { return };
+
+        let width = 66.min(area.width.saturating_sub(4));
+        let height = 9.min(area.height);
+        let popup = Rect {
+            x: area.x + area.width.saturating_sub(width) / 2,
+            y: area.y + area.height.saturating_sub(height) / 2,
+            width,
+            height,
+        };
+
+        frame.render_widget(Clear, popup);
+        let border = block(Some(" Delete TestCase "))
+            .border_style(theme::RED)
+            .title_style(Style::new().fg(theme::RED).bold())
+            .title_alignment(Alignment::Center);
+        let inner = border.inner(popup);
+        frame.render_widget(border, popup);
+
+        let preview = |text: &str| -> String {
+            let first = text.lines().next().unwrap_or("").trim();
+            if first.is_empty() {
+                return "(empty)".to_string();
+            }
+            let mut short: String = first.chars().take(44).collect();
+            if first.chars().count() > 44 {
+                short.push('…');
+            }
+            short
+        };
+
+        let input = preview(&tc.inp_content.lines().join("\n"));
+        let expected = preview(&tc.exp_content.lines().join("\n"));
+        let rows: Vec<Line> = vec![
+            Line::from(vec![
+                Span::styled("  Delete ", Style::new().fg(theme::MUTED)),
+                Span::styled(
+                    format!("case {} of {}", self.tc_list.active_area + 1, total),
+                    Style::new().fg(theme::RED).bold(),
+                ),
+                Span::styled(" for good?", Style::new().fg(theme::MUTED)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  input     ", Style::new().fg(theme::MUTED)),
+                Span::styled(input, Style::new().fg(theme::CYAN)),
+            ]),
+            Line::from(vec![
+                Span::styled("  expected  ", Style::new().fg(theme::MUTED)),
+                Span::styled(expected, Style::new().fg(theme::TEXT)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  [Enter]", Style::new().fg(theme::RED).bold()),
+                Span::styled(" delete      ", Style::new().fg(theme::MUTED)),
+                Span::styled("[Backspace]", Style::new().fg(theme::GREEN).bold()),
+                Span::styled(" back", Style::new().fg(theme::MUTED)),
+            ]),
+        ];
+
+        let body = Paragraph::new(rows)
+            .block(Block::default().padding(ratatui::widgets::Padding::symmetric(1, 0)));
         frame.render_widget(body, inner);
     }
 
@@ -453,51 +707,101 @@ impl Helper {
     // ------------------------------------------------------------------
 
     pub fn cmd_run(&mut self) -> Option<PassingCommand> {
-        if self.running {
-            self.dir_terminal.set_message(theme::YELLOW, "already running — wait for the verdicts");
-            return None;
+        match self.begin_run() {
+            Ok(command) => Some(command),
+            Err(refusal) => {
+                self.dir_terminal.set_message(refusal.color(), refusal.message());
+                None
+            }
         }
-        let Some(problem) = &self.active_problem else {
-            self.dir_terminal
-                .set_message(theme::RED, "no active problem — receive one or open a file via a Zed task");
-            return None;
+    }
+
+    /// The only place that starts a run — both the TUI key and `zch send`
+    /// go through it, so the "already running" guard cannot drift.
+    fn begin_run(&mut self) -> Result<PassingCommand, RunRefusal> {
+        if self.running {
+            return Err(RunRefusal::AlreadyRunning);
+        }
+        let Some(mut problem) = self.active_problem.clone() else {
+            return Err(RunRefusal::NoProblem);
         };
+
+        let mut smoke = false;
         if problem.test_cases.is_empty() {
-            self.dir_terminal
-                .set_message(theme::YELLOW, "no test cases for this problem — press [a] to add one");
-            return None;
+            // A file opened via `zch send r` has no stored cases; running it
+            // with empty input is still useful as a compile + crash check.
+            if self.tc_list.testcases.is_empty() {
+                self.tc_list.testcases.push(TestCase::new("", ""));
+            }
+            problem.test_cases = vec![ReceivingTestCase {
+                input: String::new(),
+                expected_output: String::new(),
+            }];
+            smoke = true;
         }
 
         for tc in self.tc_list.testcases.iter_mut() {
             tc.reset_result();
         }
+        self.last_compile = None;
         self.running = true;
+        self.run_started = Some(Instant::now());
         self.run_id = self.run_id.wrapping_add(1);
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.run_cancel = cancel.clone();
         self.dir_terminal.set_message(
             theme::CYAN,
-            format!(
-                "compiling & running {} case{} · TL {}ms",
-                problem.test_cases.len(),
-                if problem.test_cases.len() == 1 { "" } else { "s" },
-                problem.effective_time_limit()
-            ),
+            if smoke {
+                "no stored cases — smoke-running with empty input & expected output".to_string()
+            } else {
+                format!(
+                    "running {} case{} · TL {}ms",
+                    problem.test_cases.len(),
+                    if problem.test_cases.len() == 1 { "" } else { "s" },
+                    problem.effective_time_limit()
+                )
+            },
         );
-        Some(ToRunner(RunnerCommand::RunCode {
-            problem: problem.clone(),
+        Ok(ToRunner(RunnerCommand::RunCode {
+            problem,
             run_id: self.run_id,
+            cancel,
         }))
     }
 
+    /// Live compile/run status from the runner.
+    pub fn run_phase(&mut self, run_id: u64, message: String) {
+        if run_id != self.run_id || !self.running {
+            return;
+        }
+        if message.starts_with("compiled in") {
+            self.last_compile = Some(message.clone());
+        } else if message.starts_with("sources unchanged") {
+            self.last_compile = Some("compile skipped".to_string());
+        }
+        self.dir_terminal.set_message(theme::CYAN, message);
+    }
+
     fn cancel_run(&mut self) {
+        if self.running
+            && let Some(started) = self.run_started.take()
+        {
+            self.dir_terminal.set_message(
+                theme::YELLOW,
+                format!("run cancelled after {}ms", started.elapsed().as_millis()),
+            );
+        }
+        self.run_started = None;
+        self.run_cancel.store(true, Ordering::SeqCst);
         self.running = false;
         self.run_id = self.run_id.wrapping_add(1);
     }
 
-    pub fn cmd_add(&mut self) {
+    pub fn cmd_add(&mut self) -> bool {
         if self.active_problem.is_none() {
             self.dir_terminal
                 .set_message(theme::RED, "no active problem — receive one to add custom cases");
-            return;
+            return false;
         }
         // Editing mutates cases the runner may still be writing to — retire the run.
         self.cancel_run();
@@ -506,25 +810,77 @@ impl Helper {
         self.expand_all_cases();
         self.sync_problem_tests();
         self.dir_terminal.set_message(
-            theme::GREEN,
+            theme::MUTED,
             format!(
-                "editing case {} · [Tab] switch field · [Esc] save",
+                "editing case {} · [Tab/Shift+Tab] switch field · [Esc] save",
                 self.tc_list.testcases.len()
             ),
         );
+        true
     }
 
-    pub fn cmd_edit(&mut self) {
+    pub fn cmd_edit(&mut self) -> bool {
         if self.active_problem.is_none() || self.tc_list.testcases.is_empty() {
             self.dir_terminal.set_message(theme::RED, "nothing to edit");
-            return;
+            return false;
         }
         self.cancel_run();
         self.input_mode = InputMode::Editing;
         self.tc_list.focus_first();
         self.expand_all_cases();
         self.dir_terminal
-            .set_message(theme::GREEN, "editing · [Tab] switch field · [Esc] save");
+            .set_message(theme::MUTED, "editing · [Tab/Shift+Tab] switch field · [Esc] save");
+        true
+    }
+
+    /// `x` enters delete mode: the focused case is highlighted, `Tab` picks
+    /// another one, `Enter` asks for confirmation, and only that deletes.
+    pub fn cmd_delete(&mut self) {
+        if self.tc_list.testcases.is_empty() {
+            self.dir_terminal.set_message(theme::RED, "no test case to delete");
+            return;
+        }
+        // A stale run must not write verdicts into a list that is about to shift.
+        self.cancel_run();
+        self.expand_all_cases();
+        self.tc_list.active_area = self.tc_list.active_area.min(self.tc_list.testcases.len() - 1);
+        self.tc_list.update_scroll();
+        self.input_mode = InputMode::DeleteSelect;
+        self.dir_terminal.set_message(
+            theme::RED,
+            "delete mode · [Tab/Shift+Tab] select case · [Enter] confirm · [Esc] cancel",
+        );
+    }
+
+    /// Moves the delete selection by one case, wrapping around.
+    fn cycle_delete_selection(&mut self, backwards: bool) {
+        let total = self.tc_list.testcases.len();
+        if total == 0 {
+            return;
+        }
+        self.tc_list.active_area = step_wrapped(self.tc_list.active_area, total, backwards);
+        self.tc_list.update_scroll();
+    }
+
+    /// The confirmed half of the delete flow.
+    fn delete_selected_case(&mut self) {
+        let total = self.tc_list.testcases.len();
+        if total == 0 {
+            self.input_mode = InputMode::Normal;
+            return;
+        }
+        let index = self.tc_list.active_area.min(total - 1);
+        self.tc_list.testcases.remove(index);
+        self.tc_list.active_area = self.tc_list.active_area.min(self.tc_list.testcases.len().saturating_sub(1));
+        self.tc_list.active_box = ActiveBox::Input;
+        self.tc_list.update_scroll();
+        self.input_mode = InputMode::Normal;
+        if self.sync_problem_tests() {
+            self.dir_terminal.set_message(
+                theme::TEXT,
+                format!("deleted case {} · {} left", index + 1, self.tc_list.testcases.len()),
+            );
+        }
     }
 
     /// Nothing may stay hidden behind a collapsed card while editing — the
@@ -545,6 +901,7 @@ impl Helper {
         let (config, _) = self.fs_ops.load_config();
         let payload = SubmitConfig {
             language: config.language,
+            extra_flags: config.active_flags().to_vec(),
             url: problem.url.clone(),
             file_path: problem.code_file.clone(),
         };
@@ -570,22 +927,53 @@ impl Helper {
         None
     }
 
-    pub fn external_command(&mut self, file: Option<PathBuf>, action: RunAction) -> Option<PassingCommand> {
+    /// Handle an externally triggered command (HTTP / Zed task). The result is
+    /// reported back to the caller so `zch send` can print a real reason.
+    pub fn external_command(
+        &mut self,
+        file: Option<PathBuf>,
+        action: RunAction,
+    ) -> (Option<PassingCommand>, Result<String, String>) {
         if let Some(file) = file
-            && !self.set_active_from_file(&file) {
-                return None;
+            && let Err(error) = self.set_active_from_file(&file) {
+                return (None, Err(error));
             }
         match action {
-            RunAction::Run => self.cmd_run(),
+            RunAction::Run => match self.begin_run() {
+                Ok(command) => {
+                    let cases = self.tc_list.testcases.len();
+                    (
+                        Some(command),
+                        Ok(format!("running {cases} test case{}", if cases == 1 { "" } else { "s" })),
+                    )
+                }
+                Err(refusal) => {
+                    self.dir_terminal.set_message(refusal.color(), refusal.message());
+                    (None, Err(refusal.message().to_string()))
+                }
+            },
             RunAction::Add => {
-                self.cmd_add();
-                None
+                if self.cmd_add() {
+                    (None, Ok("opened a new test case in the TUI".to_string()))
+                } else {
+                    (None, Err("no active problem — receive one first".to_string()))
+                }
             }
             RunAction::Edit => {
-                self.cmd_edit();
-                None
+                if self.cmd_edit() {
+                    (None, Ok("opened the test editor in the TUI".to_string()))
+                } else {
+                    (None, Err("nothing to edit".to_string()))
+                }
             }
-            RunAction::Submit => self.cmd_submit(),
+            RunAction::Submit => {
+                self.cmd_submit();
+                if self.pending_submit.is_some() {
+                    (None, Ok("confirmation opened — finish it in the TUI".to_string()))
+                } else {
+                    (None, Err("cannot submit — see the TUI console".to_string()))
+                }
+            }
         }
     }
 
@@ -596,46 +984,38 @@ impl Helper {
     /// Wire in a freshly received Competitive Companion problem. Returns the
     /// created source file path so the caller can open it in Zed.
     pub fn new_problem(&mut self, mut problem: ActiveProblem) -> Option<PathBuf> {
-        problem.name = FsOps::sanitize_name(&problem.name);
+        let code_dir = self.dir_terminal.cur_dir.clone();
+        problem.name = self
+            .fs_ops
+            .claim_problem_stem(&problem.name, &problem.url, &code_dir);
 
         if let Err(e) = self.fs_ops.save_tc_file(&problem) {
             self.dir_terminal.set_message(theme::RED, format!("failed to save test cases: {e}"));
         }
 
-        let code_path = self.fs_ops.write_code_file(&problem, &self.dir_terminal.cur_dir.clone());        problem.code_file = code_path.clone();
+        let code_path = self.fs_ops.write_code_file(&problem, &code_dir);
+        problem.code_file = code_path.clone();
 
-        self.tc_list.clear();
-        for tc in &problem.test_cases {
-            self.tc_list
-                .testcases
-                .push(TestCase::new(&tc.input, &tc.expected_output));
-        }
-
-        self.input_mode = InputMode::Normal;
-        self.dir_terminal.set_message(
-            theme::GREEN,
-            format!(
-                "received {} · {} test{} · TL {}ms · saved to {}",
-                problem.name,
-                problem.test_cases.len(),
-                if problem.test_cases.len() == 1 { "" } else { "s" },
-                problem.effective_time_limit(),
-                code_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
-            ),
+        let summary = format!(
+            "received {} · {} test{} · TL {}ms · saved to {}",
+            problem.name,
+            problem.test_cases.len(),
+            if problem.test_cases.len() == 1 { "" } else { "s" },
+            problem.effective_time_limit(),
+            code_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
         );
 
-        self.active_problem = Some(problem);
-        // Invalidate any run that was still in flight for the previous problem.
-        self.cancel_run();
-        self.dirty = true;
+        self.attach_problem(problem);
+        self.input_mode = InputMode::Normal;
+        self.dir_terminal.set_message(theme::TEXT, summary);
         Some(code_path)
     }
 
-    fn set_active_from_file(&mut self, file: &Path) -> bool {
+    fn set_active_from_file(&mut self, file: &Path) -> Result<(), String> {
         if !file.exists() {
-            self.dir_terminal
-                .set_message(theme::RED, format!("file not found: {}", file.display()));
-            return false;
+            let message = format!("file not found: {}", file.display());
+            self.dir_terminal.set_message(theme::RED, message.clone());
+            return Err(message);
         }
 
         let stem = file
@@ -657,6 +1037,13 @@ impl Helper {
             },
         };
 
+        self.attach_problem(problem);
+        Ok(())
+    }
+
+    /// Make `problem` current, replacing the previous cases and retiring any
+    /// in-flight run. Shared by receiver payloads and `zch send`.
+    fn attach_problem(&mut self, problem: ActiveProblem) {
         self.tc_list.clear();
         for tc in &problem.test_cases {
             self.tc_list
@@ -666,7 +1053,6 @@ impl Helper {
         self.active_problem = Some(problem);
         self.cancel_run();
         self.dirty = true;
-        true
     }
 
     /// A case finished in the runner — show it immediately.
@@ -682,11 +1068,11 @@ impl Helper {
             Verdict::Success { output, time } => {
                 let got = String::from_utf8_lossy(&output.stdout).trim_end().to_string();
                 let stderr = String::from_utf8_lossy(&output.stderr).trim_end().to_string();
-                let is_ok = normalize(&got) == normalize(&expected);
+                let is_ok = normalized_eq(&got, &expected);
 
                 let mut display = got;
                 if !stderr.is_empty() {
-                    display.push_str(&format!("\n── stderr ──\n{stderr}"));
+                    display.push_str(&format!("{STDERR_MARKER}{stderr}"));
                 }
 
                 if is_ok {
@@ -707,6 +1093,13 @@ impl Helper {
         };
 
         tc.set_result(verdict, got);
+        if self
+            .pane_dialog
+            .as_ref()
+            .is_some_and(|dialog| dialog.pane == PaneKind::Got && dialog.case_index == index)
+        {
+            self.pane_dialog = None;
+        }
 
         let label = match verdict {
             CaseVerdict::AC { ms } => format!("✔ case {}/{} · AC · {}ms", index + 1, total, ms),
@@ -720,11 +1113,13 @@ impl Helper {
     }
 
     /// All cases of a run are in: summarize and focus the first failure.
-    pub fn run_finished(&mut self, run_id: u64) {
+    pub fn run_finished(&mut self, run_id: u64, elapsed_ms: u128) {
         if run_id != self.run_id {
             return;
         }
         self.running = false;
+        self.run_started = None;
+        let wall = elapsed_ms;
 
         let total = self.tc_list.testcases.len();
         if total == 0 {
@@ -749,12 +1144,19 @@ impl Helper {
             })
             .sum();
 
+        let compile = self
+            .last_compile
+            .take()
+            .map(|phase| format!(" · {phase}"))
+            .unwrap_or_default();
         let message = if compile_error {
             "✘ compilation failed — fix the errors, then press [r] again".to_string()
         } else if failed == 0 {
-            format!("✔ ALL {passed}/{total} PASSED · {total_time}ms")
+            format!("✔ ALL {passed}/{total} PASSED · {total_time}ms{compile} · {wall}ms total")
         } else {
-            format!("✘ {failed}/{total} failed · {passed} passed · {total_time}ms")
+            format!(
+                "✘ {failed}/{total} failed · {passed} passed · {total_time}ms{compile} · {wall}ms total"
+            )
         };
 
         self.dir_terminal
@@ -808,7 +1210,7 @@ impl Helper {
                 }
 
         if self.sync_problem_tests() {
-            self.dir_terminal.set_message(theme::GREEN, "test cases saved");
+            self.dir_terminal.set_message(theme::TEXT, "test cases saved");
         }
     }
 
@@ -831,12 +1233,372 @@ impl Helper {
         true
     }
 
+    fn open_pane_dialog(&mut self, index: usize, pane: PaneKind) {
+        let Some(tc) = self.tc_list.testcases.get(index) else { return };
+        let (label, color) = match pane {
+            PaneKind::Input => ("Input", theme::CYAN),
+            PaneKind::Expected => ("Expected", theme::TEXT),
+            PaneKind::Got => (
+                "Got",
+                if matches!(tc.verdict, CaseVerdict::Pending) {
+                    theme::MUTED
+                } else {
+                    tc.verdict.color()
+                },
+            ),
+        };
+        let content = if pane == PaneKind::Got && tc.got_is_paged() {
+            DialogContent::Paged {
+                case_index: index,
+                version: tc.got_version(),
+                line_count: tc.got_line_count(),
+                page_start: 0,
+                page: tc.got_page_lines(0, GOT_PAGE_LINES),
+                warning: true,
+            }
+        } else {
+            let (mut lines, warning) = match pane {
+                PaneKind::Got => tc.got_dialog_view(),
+                PaneKind::Input | PaneKind::Expected => {
+                    let text = tc.pane_text(pane);
+                    let lines = if text.is_empty() {
+                        vec![Line::from("(empty)")]
+                    } else {
+                        text.split('\n').map(|line| Line::from(line.to_string())).collect()
+                    };
+                    (lines, None)
+                }
+            };
+            if let Some(warning) = warning {
+                lines.insert(0, paged_warning_line(warning));
+            }
+            DialogContent::Lines(lines)
+        };
+        self.pane_dialog = Some(PaneDialog {
+            title: format!("{label} · TestCase {}", index + 1),
+            case_index: index,
+            pane,
+            content,
+            scroll: 0,
+            h_scroll: 0,
+            viewport: 10,
+            viewport_width: 10,
+            v_scroll_area: Rect::default(),
+            v_scroll_drag: None,
+            h_scroll_area: Rect::default(),
+            h_scroll_drag: None,
+            color,
+        });
+        self.last_pane_click = None;
+        self.dir_terminal
+            .set_message(theme::MUTED, "pane dialog · Esc closes · ↑/↓ scroll · ←/→ pan");
+    }
+
+    fn handle_pane_dialog_event(&mut self, event: Event) {
+        match event {
+            Event::Key(key) => match key.code {
+                KeyCode::Esc => {
+                    self.pane_dialog = None;
+                }
+                KeyCode::Up => self.scroll_pane_dialog(-1),
+                KeyCode::Down => self.scroll_pane_dialog(1),
+                KeyCode::Left => self.scroll_pane_dialog_horizontal(-1),
+                KeyCode::Right => self.scroll_pane_dialog_horizontal(1),
+                KeyCode::PageUp => {
+                    let page = self
+                        .pane_dialog
+                        .as_ref()
+                        .map(|dialog| dialog.viewport.max(1) as i32)
+                        .unwrap_or(1);
+                    self.scroll_pane_dialog(-page);
+                }
+                KeyCode::PageDown => {
+                    let page = self
+                        .pane_dialog
+                        .as_ref()
+                        .map(|dialog| dialog.viewport.max(1) as i32)
+                        .unwrap_or(1);
+                    self.scroll_pane_dialog(page);
+                }
+                KeyCode::Home => self.set_pane_dialog_scroll(0),
+                KeyCode::End => self.set_pane_dialog_scroll(usize::MAX),
+                _ => {}
+            },
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::ScrollDown => self.scroll_pane_dialog(1),
+                MouseEventKind::ScrollUp => self.scroll_pane_dialog(-1),
+                MouseEventKind::ScrollLeft => self.scroll_pane_dialog_horizontal(-1),
+                MouseEventKind::ScrollRight => self.scroll_pane_dialog_horizontal(1),
+                MouseEventKind::Down(MouseButton::Left) => {
+                    let position = Position::new(mouse.column, mouse.row);
+                    let vertical = self.pane_dialog.as_ref().and_then(|dialog| {
+                        dialog.v_scroll_area.contains(position).then_some((
+                            dialog.v_scroll_area,
+                            dialog
+                                .content
+                                .total_lines()
+                                .saturating_sub(dialog.viewport.max(1) as usize),
+                            dialog.scroll,
+                        ))
+                    });
+                    if let Some((area, max_scroll, scroll)) = vertical {
+                        if let Some((drag, scroll)) =
+                            ScrollbarDrag::begin(area, true, max_scroll, scroll, position)
+                            && let Some(dialog) = self.pane_dialog.as_mut()
+                        {
+                            dialog.v_scroll_drag = Some(drag);
+                            dialog.h_scroll_drag = None;
+                            dialog.scroll = scroll;
+                        }
+                        return;
+                    }
+
+                    let horizontal = self.pane_dialog.as_ref().and_then(|dialog| {
+                        dialog.h_scroll_area.contains(position).then_some((
+                            dialog.h_scroll_area,
+                            dialog
+                                .content
+                                .max_width()
+                                .saturating_sub(dialog.viewport_width.max(1) as usize),
+                            dialog.h_scroll,
+                        ))
+                    });
+                    if let Some((area, max_scroll, scroll)) = horizontal {
+                        if let Some((drag, scroll)) =
+                            ScrollbarDrag::begin(area, false, max_scroll, scroll, position)
+                            && let Some(dialog) = self.pane_dialog.as_mut()
+                        {
+                            dialog.h_scroll_drag = Some(drag);
+                            dialog.v_scroll_drag = None;
+                            dialog.h_scroll = scroll;
+                        }
+                        return;
+                    }
+
+                    if let Some(dialog) = self.pane_dialog.as_mut() {
+                        dialog.v_scroll_drag = None;
+                        dialog.h_scroll_drag = None;
+                    }
+                }
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    let position = Position::new(mouse.column, mouse.row);
+                    if let Some(dialog) = self.pane_dialog.as_mut() {
+                        if let Some(drag) = dialog.v_scroll_drag {
+                            dialog.scroll = drag.scroll_at(position);
+                        } else if let Some(drag) = dialog.h_scroll_drag {
+                            dialog.h_scroll = drag.scroll_at(position);
+                        }
+                    }
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    if let Some(dialog) = self.pane_dialog.as_mut() {
+                        dialog.v_scroll_drag = None;
+                        dialog.h_scroll_drag = None;
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    fn scroll_pane_dialog(&mut self, rows: i32) {
+        let Some(dialog) = self.pane_dialog.as_mut() else { return };
+        let max = dialog
+            .content
+            .total_lines()
+            .saturating_sub(dialog.viewport.max(1) as usize);
+        dialog.scroll = (dialog.scroll as i64 + rows as i64).clamp(0, max as i64) as usize;
+    }
+
+    fn set_pane_dialog_scroll(&mut self, scroll: usize) {
+        let Some(dialog) = self.pane_dialog.as_mut() else { return };
+        let max = dialog
+            .content
+            .total_lines()
+            .saturating_sub(dialog.viewport.max(1) as usize);
+        dialog.scroll = scroll.min(max);
+    }
+
+    fn scroll_pane_dialog_horizontal(&mut self, columns: i32) {
+        let Some(dialog) = self.pane_dialog.as_mut() else { return };
+        let max = dialog
+            .content
+            .max_width()
+            .saturating_sub(dialog.viewport_width.max(1) as usize);
+        dialog.h_scroll =
+            (dialog.h_scroll as i64 + columns as i64).clamp(0, max as i64) as usize;
+    }
+
+    fn draw_pane_dialog(&mut self, frame: &mut Frame, area: Rect) {
+        let Helper { pane_dialog, tc_list, .. } = self;
+        let Some(dialog) = pane_dialog.as_mut() else { return };
+
+        dim_area(frame, area);
+
+        let width = area.width.saturating_sub(8).max(20).min(area.width);
+        let height = area.height.saturating_sub(4).max(8).min(area.height);
+        let popup = Rect {
+            x: area.x + area.width.saturating_sub(width) / 2,
+            y: area.y + area.height.saturating_sub(height) / 2,
+            width,
+            height,
+        };
+        frame.render_widget(Clear, popup);
+
+        let border = block(Some(&format!(" {} ", dialog.title)))
+            .border_style(dialog.color)
+            .title_style(Style::new().fg(dialog.color).bold())
+            .title_alignment(Alignment::Center);
+        let inner = border.inner(popup);
+        frame.render_widget(border, popup);
+
+        let hint_height = 1.min(inner.height);
+
+        if let DialogContent::Paged {
+            case_index,
+            version,
+            line_count,
+            page_start,
+            warning,
+            ..
+        } = &mut dialog.content
+            && let Some(tc) = tc_list.testcases.get(*case_index)
+            && tc.got_version() != *version
+        {
+            *version = tc.got_version();
+            *line_count = tc.got_line_count();
+            *warning = tc.got_is_paged();
+            *page_start = usize::MAX;
+        }
+
+        let total_lines = dialog.content.total_lines();
+        let approximate_viewport = inner.height.saturating_sub(hint_height).max(1) as usize;
+        dialog.scroll = dialog.scroll.min(total_lines.saturating_sub(approximate_viewport));
+        sync_paged_page(&mut dialog.content, tc_list, dialog.scroll);
+
+        let content_width = dialog.content.max_width();
+        let initial_content_height = inner.height.saturating_sub(hint_height);
+        let initial_vscroll = total_lines > initial_content_height as usize;
+        let initial_usable_width = inner.width.saturating_sub(u16::from(initial_vscroll));
+        let mut hscroll = content_width > initial_usable_width as usize;
+        let mut content_height = initial_content_height.saturating_sub(u16::from(hscroll));
+        let mut vscroll = total_lines > content_height as usize;
+        let mut usable_width = inner.width.saturating_sub(u16::from(vscroll));
+        if !hscroll && content_width > usable_width as usize {
+            hscroll = true;
+            content_height = initial_content_height.saturating_sub(1);
+            vscroll = total_lines > content_height as usize;
+            usable_width = inner.width.saturating_sub(u16::from(vscroll));
+        }
+        dialog.viewport = content_height.max(1);
+        dialog.viewport_width = usable_width.max(1);
+        dialog.h_scroll = dialog.h_scroll.min(content_width.saturating_sub(usable_width as usize));
+
+        let max_scroll = total_lines.saturating_sub(dialog.viewport as usize);
+        dialog.scroll = dialog.scroll.min(max_scroll);
+
+        let scroll = dialog.scroll;
+        let h_scroll = dialog.h_scroll;
+        sync_paged_page(&mut dialog.content, tc_list, scroll);
+        let (display_lines, local_scroll) = match &dialog.content {
+            DialogContent::Lines(lines) => (lines.clone(), scroll),
+            DialogContent::Paged { page_start, page, warning, .. } => {
+                let warning_rows = usize::from(*warning);
+                let mut display = Vec::new();
+                if *warning && *page_start == 0 {
+                    display.push(paged_warning_line(PAGED_OUTPUT_NOTE));
+                }
+                display.extend(page.iter().cloned());
+                let base = if *page_start == 0 { 0 } else { warning_rows + *page_start };
+                (display, scroll.saturating_sub(base))
+            }
+        };
+
+        let content_area = Rect { height: content_height, ..inner };
+        frame.render_widget(
+            Paragraph::new(Text::from(display_lines)).scroll((
+                local_scroll.min(u16::MAX as usize) as u16,
+                h_scroll.min(u16::MAX as usize) as u16,
+            )),
+            content_area,
+        );
+
+        dialog.v_scroll_area = Rect::default();
+        if total_lines > dialog.viewport as usize {
+            let mut state = ScrollbarState::new(total_lines - dialog.viewport as usize)
+                .position(dialog.scroll);
+            let scrollbar = Scrollbar::new(ratatui::widgets::ScrollbarOrientation::VerticalRight)
+                .style(theme::MUTED)
+                .track_style(theme::BORDER)
+                .begin_symbol(Some("-"))
+                .end_symbol(Some("-"));
+            let scroll_area = Rect {
+                x: inner.x + inner.width.saturating_sub(1),
+                y: content_area.y,
+                width: 1,
+                height: content_height,
+            };
+            dialog.v_scroll_area = scroll_area;
+            frame.render_stateful_widget(scrollbar, scroll_area, &mut state);
+        } else {
+            dialog.v_scroll_drag = None;
+        }
+
+        dialog.h_scroll_area = Rect::default();
+        if hscroll {
+            let max_h_scroll = content_width.saturating_sub(usable_width as usize);
+            let mut state = ScrollbarState::new(max_h_scroll).position(dialog.h_scroll);
+            let scrollbar =
+                Scrollbar::new(ratatui::widgets::ScrollbarOrientation::HorizontalBottom)
+                    .style(theme::MUTED)
+                    .track_style(theme::BORDER)
+                    .begin_symbol(Some("|"))
+                    .end_symbol(Some("|"));
+            let scroll_area = Rect {
+                x: inner.x,
+                y: inner.y + content_height,
+                width: usable_width,
+                height: 1,
+            };
+            dialog.h_scroll_area = scroll_area;
+            frame.render_stateful_widget(scrollbar, scroll_area, &mut state);
+        } else {
+            dialog.h_scroll_drag = None;
+        }
+
+        if hint_height > 0 {
+            let hint = Paragraph::new(Line::from(vec![
+                Span::styled("Esc", Style::new().fg(theme::ACCENT).bold()),
+                Span::styled(" close   ", Style::new().fg(theme::MUTED)),
+                Span::styled("↑/↓", Style::new().fg(theme::ACCENT).bold()),
+                Span::styled(" scroll   ", Style::new().fg(theme::MUTED)),
+                Span::styled("←/→", Style::new().fg(theme::ACCENT).bold()),
+                Span::styled(" pan   ", Style::new().fg(theme::MUTED)),
+                Span::styled("PgUp/PgDn", Style::new().fg(theme::ACCENT).bold()),
+            ]))
+            .alignment(Alignment::Center);
+            frame.render_widget(
+                hint,
+                Rect {
+                    y: inner.y + inner.height - 1,
+                    height: 1,
+                    ..inner
+                },
+            );
+        }
+    }
+
     // ------------------------------------------------------------------
     // Event handling
     // ------------------------------------------------------------------
 
     pub fn handle_event(&mut self, event: Event) -> Option<PassingCommand> {
         self.dirty = true;
+        if self.pane_dialog.is_some() {
+            self.handle_pane_dialog_event(event);
+            return None;
+        }
         match event {
             Event::Key(key) => match self.input_mode {
                 InputMode::Editing => {
@@ -848,10 +1610,16 @@ impl Helper {
                     self.tc_list.update_scroll();
                 }
                 InputMode::Normal => match key.code {
+                    KeyCode::Esc if self.running => self.cancel_run(),
                     KeyCode::Char('q') => return Some(ToHelper(HelperCommand::Quit)),
-                    KeyCode::Char('a') => self.cmd_add(),
+                    KeyCode::Char('a') => {
+                        self.cmd_add();
+                    }
+                    KeyCode::Char('x') => self.cmd_delete(),
                     KeyCode::Char('r') => return self.cmd_run(),
-                    KeyCode::Char('e') => self.cmd_edit(),
+                    KeyCode::Char('e') => {
+                        self.cmd_edit();
+                    }
                     KeyCode::Char('s') => return self.cmd_submit(),
                     KeyCode::Char('d') => {
                         self.input_mode = InputMode::Directory;
@@ -860,6 +1628,32 @@ impl Helper {
                         let (config, _) = self.fs_ops.load_config();
                         self.config_menu = ConfigMenu::new(&config);
                         self.input_mode = InputMode::Config;
+                    }
+                    _ => {}
+                },
+                InputMode::DeleteSelect => match key.code {
+                    KeyCode::BackTab => self.cycle_delete_selection(true),
+                    KeyCode::Tab => {
+                        let backwards = key.modifiers.contains(KeyModifiers::SHIFT);
+                        self.cycle_delete_selection(backwards);
+                    }
+                    KeyCode::Enter => {
+                        self.input_mode = InputMode::ConfirmDelete;
+                    }
+                    KeyCode::Esc => {
+                        self.input_mode = InputMode::Normal;
+                        self.dir_terminal.set_message(theme::MUTED, "delete cancelled");
+                    }
+                    _ => {}
+                },
+                InputMode::ConfirmDelete => match key.code {
+                    KeyCode::Enter => self.delete_selected_case(),
+                    KeyCode::Backspace | KeyCode::Esc => {
+                        self.input_mode = InputMode::DeleteSelect;
+                        self.dir_terminal.set_message(
+                            theme::RED,
+                            "delete mode · [Tab/Shift+Tab] select case · [Enter] confirm · [Esc] cancel",
+                        );
                     }
                     _ => {}
                 },
@@ -923,13 +1717,76 @@ impl Helper {
                     _ => {}
                 },
             },
+            Event::Mouse(mouse) if matches!(self.input_mode, InputMode::Config) => {
+                self.config_menu.handle_mouse(&mouse);
+            }
             Event::Mouse(mouse) => {
+                let position = Position::new(mouse.column, mouse.row);
+                if self.submissions_scrollbar_area.contains(position) {
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            self.begin_submissions_scrollbar_drag(position);
+                            return None;
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) => {
+                            if let Some(drag) = self.submissions_scrollbar_drag {
+                                self.submission_scroll = drag.scroll_at(position);
+                            }
+                            return None;
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            self.submissions_scrollbar_drag = None;
+                            return None;
+                        }
+                        _ => {}
+                    }
+                }
+
+                if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) {
+                    self.submissions_scrollbar_drag = None;
+                }
+                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                    self.submissions_scrollbar_drag = None;
+                }
+
+                if matches!(self.input_mode, InputMode::Normal | InputMode::Editing)
+                    && let MouseEventKind::Down(MouseButton::Left) = mouse.kind
+                {
+                    let hit = self.tc_list.pane_at(mouse.column, mouse.row);
+                    let double = hit.is_some_and(|(index, pane)| {
+                        self.last_pane_click.is_some_and(|(at, last_index, last_pane)| {
+                            last_index == index
+                                && last_pane == pane
+                                && at.elapsed() < Duration::from_millis(450)
+                        })
+                    });
+                    self.last_pane_click = hit.map(|(index, pane)| (Instant::now(), index, pane));
+                    if double
+                        && let Some((index, pane)) = hit
+                    {
+                        self.open_pane_dialog(index, pane);
+                        return None;
+                    }
+                }
+
                 let over_submissions = self
                     .submissions_area
                     .contains(Position::new(mouse.column, mouse.row));
                 match mouse.kind {
                     MouseEventKind::ScrollDown if over_submissions => self.scroll_submissions(true),
                     MouseEventKind::ScrollUp if over_submissions => self.scroll_submissions(false),
+                    MouseEventKind::ScrollDown => {
+                        let editing = matches!(self.input_mode, InputMode::Editing);
+                        if !editing || !self.tc_list.scroll_active_pane(&mouse, true) {
+                            self.tc_list.handle_mouse(&mouse);
+                        }
+                    }
+                    MouseEventKind::ScrollUp => {
+                        let editing = matches!(self.input_mode, InputMode::Editing);
+                        if !editing || !self.tc_list.scroll_active_pane(&mouse, false) {
+                            self.tc_list.handle_mouse(&mouse);
+                        }
+                    }
                     _ => self.tc_list.handle_mouse(&mouse),
                 }
             }
@@ -939,12 +1796,22 @@ impl Helper {
     }
 }
 
-fn normalize(text: &str) -> String {
-    text.trim()
-        .lines()
-        .map(|line| line.trim_end())
-        .collect::<Vec<_>>()
-        .join("\n")
+fn dim_area(frame: &mut Frame, area: Rect) {
+    let style = Style::new().add_modifier(Modifier::DIM);
+    frame.render_widget(Block::default().style(style), area);
+}
+
+/// Compare trimmed output without building a second copy of a huge result.
+fn normalized_eq(left: &str, right: &str) -> bool {
+    let mut left = left.trim().lines().map(str::trim_end);
+    let mut right = right.trim().lines().map(str::trim_end);
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return true,
+            (Some(left), Some(right)) if left == right => {}
+            _ => return false,
+        }
+    }
 }
 
 fn url_from_code(path: &Path) -> Option<String> {
@@ -959,7 +1826,7 @@ fn url_from_code(path: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{Language, ReceivingTestCase};
+    use crate::core::{Language, ReceivingTestCase, UserConfig};
     use ratatui::{
         Terminal,
         backend::TestBackend,
@@ -1008,7 +1875,79 @@ mod tests {
         for (index, verdict) in results.into_iter().enumerate() {
             helper.apply_case_result(helper.run_id, index, verdict);
         }
-        helper.run_finished(helper.run_id);
+        helper.run_finished(helper.run_id, 0);
+    }
+
+    #[test]
+    fn same_name_problems_keep_separate_state() {
+        let root = temp_root("identity");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+        let mut helper = Helper::new(work, &fs_ops);
+
+        let mut first = sample_problem();
+        first.name = "A. Shared".into();
+        first.url = "https://codeforces.com/contest/1111/problem/A".into();
+        let first_path = helper.new_problem(first).unwrap();
+
+        let mut second = sample_problem();
+        second.name = "A. Shared".into();
+        second.url = "https://codeforces.com/contest/2222/problem/A".into();
+        second.test_cases =
+            vec![ReceivingTestCase { input: "9".into(), expected_output: "9".into() }];
+        let second_path = helper.new_problem(second).unwrap();
+
+        assert_eq!(first_path.file_stem().unwrap().to_string_lossy(), "A__Shared");
+        let second_stem = second_path.file_stem().unwrap().to_string_lossy().to_string();
+        assert!(second_stem.starts_with("A__Shared__"), "{second_stem}");
+        assert_ne!(first_path, second_path);
+
+        let first_saved = fs_ops.load_problem_by_stem("A__Shared").unwrap();
+        assert_eq!(first_saved.test_cases[0].input, "1 2");
+        let second_saved = fs_ops.load_problem_by_stem(&second_stem).unwrap();
+        assert_eq!(second_saved.test_cases[0].input, "9");
+        assert_eq!(second_saved.url, "https://codeforces.com/contest/2222/problem/A");
+        assert_ne!(
+            fs_ops.binary_dir.join(&first_saved.name),
+            fs_ops.binary_dir.join(&second_saved.name)
+        );
+
+        // Re-receiving the same URL must reuse its suffix, not add another one.
+        let mut again = sample_problem();
+        again.name = "A. Shared".into();
+        again.url = "https://codeforces.com/contest/2222/problem/A".into();
+        assert_eq!(helper.new_problem(again).unwrap(), second_path);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn anonymous_problems_with_the_same_name_do_not_overwrite() {
+        let root = temp_root("anonymous-identity");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+        let mut helper = Helper::new(work, &fs_ops);
+
+        let mut first = sample_problem();
+        first.name = "A. Anonymous".into();
+        first.url.clear();
+        let first_path = helper.new_problem(first).unwrap();
+
+        let mut second = sample_problem();
+        second.name = "A. Anonymous".into();
+        second.url.clear();
+        second.test_cases =
+            vec![ReceivingTestCase { input: "9".into(), expected_output: "9".into() }];
+        let second_path = helper.new_problem(second).unwrap();
+
+        assert_eq!(first_path.file_stem().unwrap().to_string_lossy(), "A__Anonymous");
+        assert_eq!(second_path.file_stem().unwrap().to_string_lossy(), "A__Anonymous__2");
+        assert_eq!(fs_ops.load_problem_by_stem("A__Anonymous").unwrap().test_cases[0].input, "1 2");
+        assert_eq!(fs_ops.load_problem_by_stem("A__Anonymous__2").unwrap().test_cases[0].input, "9");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1041,7 +1980,7 @@ mod tests {
         assert!(matches!(helper.tc_list.testcases[1].verdict, CaseVerdict::Pending));
 
         helper.apply_case_result(helper.run_id, 1, results[1].clone());
-        helper.run_finished(helper.run_id);
+        helper.run_finished(helper.run_id, 0);
         terminal.draw(|f| helper.draw(f)).unwrap();
 
         assert!(matches!(helper.tc_list.testcases[1].verdict, CaseVerdict::WA { ms: 9 }));
@@ -1112,6 +2051,89 @@ mod tests {
     }
 
     #[test]
+    fn delete_selects_and_asks_for_confirmation() {
+        let root = temp_root("delete");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        helper.new_problem(sample_problem());
+        helper.running = true;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+
+        helper.tc_list.testcases[0].collapsed = true;
+        helper.tc_list.testcases[1].collapsed = true;
+        helper.tc_list.active_area = 0;
+        helper.handle_event(key(KeyCode::Char('x')));
+        assert!(matches!(helper.input_mode, InputMode::DeleteSelect));
+        assert_eq!(helper.tc_list.testcases.len(), 2, "x only starts the flow");
+        assert!(
+            helper.tc_list.testcases.iter().all(|tc| !tc.collapsed),
+            "delete selection must show every case open"
+        );
+        assert!(!helper.running, "an in-flight run is retired before the list shifts");
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        dump_screen(&terminal);
+
+        // Tab picks the next case; the selection wraps in both directions.
+        helper.handle_event(key(KeyCode::Tab));
+        assert_eq!(helper.tc_list.active_area, 1);
+        helper.handle_event(key(KeyCode::Tab));
+        assert_eq!(helper.tc_list.active_area, 0, "selection wraps around");
+        helper.handle_event(key(KeyCode::BackTab));
+        assert_eq!(helper.tc_list.active_area, 1);
+
+        // Enter opens the confirmation; Esc there goes back to the selection.
+        helper.handle_event(key(KeyCode::Enter));
+        assert!(matches!(helper.input_mode, InputMode::ConfirmDelete));
+        assert_eq!(helper.tc_list.testcases.len(), 2, "confirmation must not delete yet");
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        dump_screen(&terminal);
+        helper.handle_event(key(KeyCode::Esc));
+        assert!(matches!(helper.input_mode, InputMode::DeleteSelect));
+
+        // Esc leaves the flow entirely; nothing is deleted.
+        helper.handle_event(key(KeyCode::Esc));
+        assert!(matches!(helper.input_mode, InputMode::Normal));
+        assert_eq!(helper.tc_list.testcases.len(), 2);
+
+        // x -> Enter -> Enter deletes the selected case and persists the rest.
+        helper.handle_event(key(KeyCode::Char('x')));
+        helper.handle_event(key(KeyCode::Enter));
+        helper.handle_event(key(KeyCode::Enter));
+        assert!(matches!(helper.input_mode, InputMode::Normal));
+        assert_eq!(helper.tc_list.testcases.len(), 1);
+        assert_eq!(helper.tc_list.active_area, 0);
+        let saved = fs_ops.load_problem_by_stem("E_Prime_Destruction").unwrap();
+        assert_eq!(saved.test_cases.len(), 1);
+        assert_eq!(saved.test_cases[0].input, "1 2");
+
+        // Deleting the last case leaves an empty list without panicking.
+        helper.handle_event(key(KeyCode::Char('x')));
+        helper.handle_event(key(KeyCode::Enter));
+        helper.handle_event(key(KeyCode::Enter));
+        assert!(helper.tc_list.testcases.is_empty());
+        let saved = fs_ops.load_problem_by_stem("E_Prime_Destruction").unwrap();
+        assert!(saved.test_cases.is_empty());
+
+        // With an empty list x just reports it and stays in Normal mode.
+        helper.handle_event(key(KeyCode::Char('x')));
+        assert!(matches!(helper.input_mode, InputMode::Normal));
+
+        // In Editing mode `x` is a character, not the delete command.
+        helper.handle_event(key(KeyCode::Char('a')));
+        helper.handle_event(key(KeyCode::Char('x')));
+        assert_eq!(helper.tc_list.testcases.len(), 1);
+        helper.handle_event(key(KeyCode::Esc));
+        assert_eq!(helper.tc_list.testcases.len(), 1);
+        assert_eq!(helper.tc_list.testcases[0].inp_content.lines().join("\n"), "x");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn config_menu_cycles_language_and_saves() {
         let root = temp_root("config");
         let fs_ops = FsOps::with_root(root.clone());
@@ -1125,13 +2147,29 @@ mod tests {
         assert!(matches!(helper.input_mode, InputMode::Config));
         terminal.draw(|f| helper.draw(f)).unwrap();
 
+        helper.handle_event(key(KeyCode::Tab));
+        type_text(&mut helper, "-O2");
+        helper.handle_event(key(KeyCode::Enter));
+        helper.handle_event(key(KeyCode::Tab));
         helper.handle_event(key(KeyCode::Right));
+        assert_eq!(helper.config_menu.language, Language::Python);
+        assert!(helper.config_menu.flags.is_empty());
+
+        helper.handle_event(key(KeyCode::Tab));
+        type_text(&mut helper, "-u");
+        helper.handle_event(key(KeyCode::Enter));
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        dump_screen(&terminal);
+
         helper.handle_event(key(KeyCode::Esc));
         assert!(matches!(helper.input_mode, InputMode::Normal));
 
         let (config, loaded) = fs_ops.load_config();
         assert!(loaded);
-        assert_eq!(config.language, Language::Cpp20);
+        assert_eq!(config.language, Language::Python);
+        assert_eq!(config.extra_flags, ["-u"]);
+        assert_eq!(config.flags_by_language[&Language::Cpp], ["-O2"]);
+        assert_eq!(config.flags_by_language[&Language::Python], ["-u"]);
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1153,7 +2191,7 @@ mod tests {
         assert_eq!(pending.info.platform, "Codeforces");
         assert_eq!(pending.info.problem_code, "E");
         assert_eq!(pending.info.submit_url, "https://codeforces.com/contest/2266/submit");
-        assert_eq!(pending.info.language_id, Language::Cpp23.cf_id());
+        assert_eq!(pending.info.language_id, Language::Cpp.cf_id(&[]));
         assert_eq!(pending.test_count, 2);
         terminal.draw(|f| helper.draw(f)).unwrap();
         dump_screen(&terminal);
@@ -1232,6 +2270,236 @@ mod tests {
     }
 
     #[test]
+    fn master_border_focuses_the_active_working_directory() {
+        let root = temp_root("active_dir_focus");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        helper.new_problem(sample_problem());
+        helper.handle_event(key(KeyCode::Char('d')));
+        assert!(matches!(helper.input_mode, InputMode::Directory));
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        dump_screen(&terminal);
+        let buffer = terminal.backend().buffer();
+        assert_eq!(
+            buffer[(0, 0)].fg,
+            theme::ACCENT,
+            "the master border is accent blue"
+        );
+        assert_eq!(
+            buffer[(2, 1)].fg,
+            theme::ACCENT,
+            "the active command bar is focused in accent blue"
+        );
+        assert_eq!(
+            buffer[(3, 2)].bg,
+            Color::Reset,
+            "the command bar must not have a filled background"
+        );
+        let footer = (0..buffer.area.width)
+            .map(|x| buffer[(x, buffer.area.height - 2)].symbol())
+            .collect::<String>();
+        assert!(footer.contains("CONSOLE"), "the footer names the console mode");
+        assert!(
+            !footer.contains("DIRECTORY"),
+            "the original UI labels this mode as the console"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn footer_keeps_key_descriptions_and_original_badges() {
+        let root = temp_root("footer_descriptions");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        dump_screen(&terminal);
+        let buffer = terminal.backend().buffer();
+        let footer = (0..buffer.area.width)
+            .map(|x| buffer[(x, buffer.area.height - 2)].symbol())
+            .collect::<String>();
+        assert!(
+            footer.contains("[a] add case") && footer.contains("[q] quit"),
+            "every key keeps its description: {footer}"
+        );
+        assert!(
+            !footer.contains("NORMAL"),
+            "normal mode has no badge in the original UI: {footer}"
+        );
+
+        helper.handle_event(key(KeyCode::Char('d')));
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let footer = (0..buffer.area.width)
+            .map(|x| buffer[(x, buffer.area.height - 2)].symbol())
+            .collect::<String>();
+        let x = footer.find("CONSOLE").unwrap() as u16;
+        assert_eq!(buffer[(x, buffer.area.height - 2)].fg, Color::Black);
+        assert_eq!(
+            buffer[(x, buffer.area.height - 2)].bg,
+            theme::CYAN,
+            "mode labels are filled badges in the original UI"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn footer_does_not_repeat_the_console_run_status() {
+        let root = temp_root("footer_busy");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        helper.new_problem(sample_problem());
+        helper.running = true;
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|f| helper.draw(f)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let footer = (0..buffer.area.width)
+            .map(|x| buffer[(x, buffer.area.height - 2)].symbol())
+            .collect::<String>();
+        assert!(
+            !footer.contains("running tests"),
+            "the console owns the run status: {footer}"
+        );
+        assert!(footer.contains("[r] run"), "the key hints stay visible: {footer}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn master_border_has_the_brand_and_a_right_aligned_directory_title() {
+        let root = temp_root("sticky_header");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        helper.new_problem(sample_problem());
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        dump_screen(&terminal);
+        let buffer = terminal.backend().buffer();
+        let header = (0..buffer.area.width)
+            .map(|x| buffer[(x, 0)].symbol())
+            .collect::<String>();
+        assert!(header.contains("ZCH"), "the brand chip is back: {header}");
+        let brand_x = header.find('Z').unwrap() as u16;
+        assert_eq!(buffer[(brand_x, 0)].fg, theme::ACCENT);
+
+        let row = (0..buffer.area.width)
+            .map(|x| buffer[(x, 1)].symbol())
+            .collect::<String>();
+        let title_x = row[..row.find("Working Directory").unwrap()].chars().count() as u16;
+        assert!(
+            title_x > buffer.area.width / 2,
+            "the directory title sits on the right: {row}"
+        );
+        assert_eq!(buffer[(title_x, 1)].fg, theme::CYAN);
+        assert_eq!(
+            buffer[(3, 2)].bg,
+            Color::Reset,
+            "the directory bar has no fill"
+        );
+
+        helper.handle_event(key(KeyCode::Char('d')));
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = (0..buffer.area.width)
+            .map(|x| buffer[(x, 1)].symbol())
+            .collect::<String>();
+        assert!(
+            !row.contains("Working Directory"),
+            "the active command bar shows the path prompt instead: {row}"
+        );
+        assert_eq!(buffer[(2, 1)].fg, theme::ACCENT);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn original_sections_are_bordered_without_a_fill() {
+        let root = temp_root("sticky_bg");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        helper.new_problem(sample_problem());
+        helper.handle_event(key(KeyCode::Char('s')));
+        helper.handle_event(key(KeyCode::Enter));
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        let buffer = terminal.backend().buffer();
+
+        assert_eq!(buffer[(0, 0)].fg, theme::ACCENT);
+        assert_eq!(
+            buffer[(3, 2)].bg,
+            Color::Reset,
+            "the command bar must not have a filled background"
+        );
+
+        let submissions = helper.submissions_area;
+        assert_eq!(buffer[(submissions.x, submissions.y)].fg, theme::BORDER);
+        assert_eq!(
+            buffer[(submissions.x + 1, submissions.y + 1)].bg,
+            Color::Reset,
+            "the submissions panel uses the terminal background"
+        );
+
+        let console_height = helper.dir_terminal.console_height(buffer.area.width - 2);
+        assert!(console_height > 0);
+        let console_y = buffer.area.height - 2 - console_height;
+        assert_eq!(buffer[(2, console_y)].fg, theme::BORDER);
+        assert_eq!(
+            buffer[(3, console_y + 1)].bg,
+            Color::Reset,
+            "the console panel uses the terminal background"
+        );
+        assert_eq!(
+            buffer[(1, buffer.area.height - 2)].bg,
+            Color::Reset,
+            "the footer must not have a filled background"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_case_list_has_no_outer_padding() {
+        let root = temp_root("list_edge");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        helper.new_problem(sample_problem());
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| helper.draw(f)).unwrap();
+
+        assert_eq!(helper.tc_list.testcases[0].area.rect.x, 2);
+        assert_eq!(
+            helper.tc_list.testcases[0].area.rect.y, 4,
+            "the first case starts directly under the directory bar, inside the master border"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn submissions_panel_scrolls_internally() {
         let root = temp_root("submit_scroll");
         let fs_ops = FsOps::with_root(root.clone());
@@ -1272,9 +2540,68 @@ mod tests {
         }
         assert_eq!(helper.submission_scroll, 3, "scroll clamps to overflow");
 
+        helper.submission_scroll = 0;
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        let scrollbar = helper.submissions_scrollbar_area;
+        assert!(scrollbar.height > 2, "the submissions panel must expose a scrollbar");
+        let mouse = |kind, column, row| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        let bottom = scrollbar.y + scrollbar.height - 2;
+        helper.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            scrollbar.x,
+            bottom,
+        ));
+        assert!(helper.submission_scroll > 0, "clicking the track must seek down");
+
+        helper.handle_event(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            scrollbar.x,
+            scrollbar.y + 1,
+        ));
+        assert_eq!(helper.submission_scroll, 0, "dragging to the top must seek back");
+        helper.handle_event(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            scrollbar.x,
+            scrollbar.y + 1,
+        ));
+        assert!(helper.submissions_scrollbar_drag.is_none());
+
         helper.handle_event(key(KeyCode::Char('s')));
         helper.handle_event(key(KeyCode::Enter));
         assert_eq!(helper.submission_scroll, 0, "new submission snaps back to newest");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn run_summary_uses_the_runner_elapsed_time() {
+        let root = temp_root("run_elapsed");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        helper.new_problem(sample_problem());
+        helper.running = true;
+        helper.run_started = Some(Instant::now() - Duration::from_secs(5));
+        helper.run_finished(helper.run_id, 397);
+
+        let message = &helper.dir_terminal.output.as_ref().unwrap().text;
+        assert!(
+            message.contains("397ms total"),
+            "the runner's elapsed time is the total: {message}"
+        );
+        assert!(
+            !message.contains("5000ms"),
+            "a stalled UI must not inflate the run time: {message}"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1331,6 +2658,207 @@ mod tests {
     }
 
     #[test]
+    fn shift_tab_walks_backwards_while_editing() {
+        let root = temp_root("edit-back");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        helper.new_problem(sample_problem());
+        helper.handle_event(key(KeyCode::Char('e')));
+        assert!(matches!(helper.input_mode, InputMode::Editing));
+        assert_eq!(helper.tc_list.active_box, crate::components::testcase::ActiveBox::Input);
+
+        helper.handle_event(key(KeyCode::Tab));
+        assert_eq!(helper.tc_list.active_box, crate::components::testcase::ActiveBox::Expected);
+        helper.handle_event(Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)));
+        assert_eq!(helper.tc_list.active_box, crate::components::testcase::ActiveBox::Input);
+        helper.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        assert_eq!(
+            helper.tc_list.active_box,
+            crate::components::testcase::ActiveBox::Expected,
+            "a terminal that reports Shift+Tab as Tab must still go back"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn editing_keeps_the_cursor_line_visible() {
+        let root = temp_root("edit_scroll");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        let mut problem = sample_problem();
+        problem.test_cases[0].input =
+            (0..100).map(|i| format!("line-{i:03}")).collect::<Vec<_>>().join("\n");
+        helper.new_problem(problem);
+
+        helper.handle_event(key(KeyCode::Char('e')));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        dump_screen(&terminal);
+
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("line-099"), "the cursor line must stay on screen:\n{screen}");
+
+        // Adding more lines must not shift the list under the cursor.
+        helper.handle_event(key(KeyCode::Enter));
+        type_text(&mut helper, "fresh-line");
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("fresh-line"), "new text must stay on screen:\n{screen}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn switching_to_expected_does_not_shrink_input() {
+        let root = temp_root("edit_stable_panes");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        let mut problem = sample_problem();
+        problem.test_cases[0].input =
+            (0..40).map(|i| format!("line-{i:03}")).collect::<Vec<_>>().join("\n");
+        helper.new_problem(problem);
+        helper.handle_event(key(KeyCode::Char('e')));
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        let input_height = helper.tc_list.testcases[0].input_box.rect.height;
+
+        helper.handle_event(key(KeyCode::Tab));
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        dump_screen(&terminal);
+        assert_eq!(
+            helper.tc_list.testcases[0].input_box.rect.height,
+            input_height,
+            "focusing Expected must not shrink the Input pane"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_the_editing_textarea() {
+        let root = temp_root("edit_wheel");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        let mut problem = sample_problem();
+        problem.test_cases[0].input =
+            (0..40).map(|i| format!("line-{i:03}")).collect::<Vec<_>>().join("\n");
+        helper.new_problem(problem);
+        helper.handle_event(key(KeyCode::Char('e')));
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| helper.draw(f)).unwrap();
+
+        let rect = helper.tc_list.testcases[0].input_box.rect;
+        let wheel = |kind| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column: rect.x + 2,
+                row: rect.y + 2,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        let before = helper.tc_list.testcases[0].inp_content.cursor().0;
+        let list_before = helper.tc_list.scroll_row;
+        helper.handle_event(wheel(MouseEventKind::ScrollUp));
+        assert_eq!(helper.tc_list.testcases[0].inp_content.cursor().0, before - 1);
+        assert_eq!(helper.tc_list.scroll_row, list_before, "the list must not move");
+        helper.handle_event(wheel(MouseEventKind::ScrollDown));
+        assert!(helper.tc_list.testcases[0].inp_content.cursor().0 <= before);
+        assert_eq!(helper.tc_list.scroll_row, list_before, "the list must not move");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn manual_list_scroll_survives_editing_redraws() {
+        let root = temp_root("edit_list_wheel");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        let mut problem = sample_problem();
+        let body = (0..30).map(|i| format!("line-{i:03}")).collect::<Vec<_>>().join("\n");
+        problem.test_cases = (0..4)
+            .map(|_| ReceivingTestCase { input: body.clone(), expected_output: "ok".into() })
+            .collect();
+        helper.new_problem(problem);
+        helper.handle_event(key(KeyCode::Char('e')));
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| helper.draw(f)).unwrap();
+
+        let wheel = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        });
+        helper.handle_event(wheel);
+        let scrolled = helper.tc_list.scroll_row;
+        assert!(scrolled > 0);
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        assert_eq!(helper.tc_list.scroll_row, scrolled, "redraw must not snap back");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_the_delete_list() {
+        let root = temp_root("delete_list_wheel");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        let mut problem = sample_problem();
+        let body = (0..30).map(|i| format!("line-{i:03}")).collect::<Vec<_>>().join("\n");
+        problem.test_cases = (0..4)
+            .map(|_| ReceivingTestCase { input: body.clone(), expected_output: "ok".into() })
+            .collect();
+        helper.new_problem(problem);
+        helper.handle_event(key(KeyCode::Char('x')));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| helper.draw(f)).unwrap();
+
+        let wheel = Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        });
+        helper.handle_event(wheel);
+        let scrolled = helper.tc_list.scroll_row;
+        assert!(scrolled > 0);
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        assert_eq!(helper.tc_list.scroll_row, scrolled, "delete mode keeps manual scroll");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn clicking_a_pane_in_edit_mode_moves_the_focus() {
         let root = temp_root("click_focus");
         let fs_ops = FsOps::with_root(root.clone());
@@ -1372,6 +2900,335 @@ mod tests {
     }
 
     #[test]
+    fn double_click_opens_a_bigger_pane_dialog() {
+        let root = temp_root("pane_dialog");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        helper.new_problem(sample_problem());
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|f| helper.draw(f)).unwrap();
+
+        let rect = helper.tc_list.testcases[0].input_box.rect;
+        let click = || {
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x + 2,
+                row: rect.y + 1,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+
+        helper.handle_event(click());
+        assert!(helper.pane_dialog.is_none(), "one click must not open the dialog");
+        helper.handle_event(click());
+        let dialog = helper.pane_dialog.as_ref().expect("double click opens the dialog");
+        assert!(dialog.title.starts_with("Input · TestCase 1"));
+        assert!(dialog.visible_lines().iter().any(|line| line.to_string() == "1 2"));
+
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        dump_screen(&terminal);
+
+        helper.handle_event(key(KeyCode::Esc));
+        assert!(helper.pane_dialog.is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pane_dialog_pans_horizontally() {
+        let root = temp_root("pane_dialog_hscroll");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        let mut problem = sample_problem();
+        problem.test_cases[0].input = format!("START{}END", "x".repeat(300));
+        helper.new_problem(problem);
+        helper.open_pane_dialog(0, PaneKind::Input);
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        let screen = |terminal: &Terminal<TestBackend>| {
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let dialog = helper.pane_dialog.as_ref().expect("dialog opened");
+        assert_eq!(dialog.h_scroll, 0);
+        assert!(dialog.viewport_width < 300);
+        assert!(screen(&terminal).contains("START"));
+
+        helper.handle_event(key(KeyCode::Right));
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        assert_eq!(helper.pane_dialog.as_ref().unwrap().h_scroll, 1);
+        assert!(!screen(&terminal).contains("START"));
+
+        helper.handle_event(key(KeyCode::Left));
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        assert_eq!(helper.pane_dialog.as_ref().unwrap().h_scroll, 0);
+        assert!(screen(&terminal).contains("START"));
+
+        let area = helper.pane_dialog.as_ref().unwrap().h_scroll_area;
+        assert!(area.width > 1, "the horizontal scrollbar must be hittable");
+        let mouse = |kind, column, row| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+
+        helper.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            area.x + area.width - 1,
+            area.y,
+        ));
+        let dialog = helper.pane_dialog.as_ref().unwrap();
+        let max = dialog
+            .content
+            .max_width()
+            .saturating_sub(dialog.viewport_width as usize);
+        assert!(max > 0);
+        assert_eq!(dialog.h_scroll, max, "clicking the track seeks to the end");
+
+        helper.handle_event(mouse(MouseEventKind::Drag(MouseButton::Left), area.x, area.y));
+        assert_eq!(
+            helper.pane_dialog.as_ref().unwrap().h_scroll,
+            0,
+            "dragging the scrollbar seeks back"
+        );
+
+        helper.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), area.x, area.y));
+        assert!(helper.pane_dialog.as_ref().unwrap().h_scroll_drag.is_none());
+
+        helper.handle_event(mouse(MouseEventKind::ScrollRight, area.x + 1, area.y));
+        assert_eq!(helper.pane_dialog.as_ref().unwrap().h_scroll, 1);
+        helper.handle_event(mouse(MouseEventKind::ScrollLeft, area.x + 1, area.y));
+        assert_eq!(helper.pane_dialog.as_ref().unwrap().h_scroll, 0);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pane_dialog_vertical_scrollbar_drags() {
+        let root = temp_root("pane_dialog_vscroll");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        let input = (0..100).map(|index| format!("line-{index:03}")).collect::<Vec<_>>().join("\n");
+        let mut problem = sample_problem();
+        problem.test_cases = vec![ReceivingTestCase {
+            input,
+            expected_output: String::new(),
+        }];
+        helper.new_problem(problem);
+        helper.open_pane_dialog(0, PaneKind::Input);
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        let area = helper.pane_dialog.as_ref().unwrap().v_scroll_area;
+        assert!(area.height > 2, "the pane dialog must expose a vertical scrollbar");
+
+        let mouse = |kind, column, row| {
+            Event::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        let bottom = area.y + area.height - 2;
+        helper.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), area.x, bottom));
+        assert!(
+            helper.pane_dialog.as_ref().unwrap().scroll > 0,
+            "clicking the track must seek down"
+        );
+
+        helper.handle_event(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            area.x,
+            area.y + 1,
+        ));
+        assert_eq!(
+            helper.pane_dialog.as_ref().unwrap().scroll,
+            0,
+            "dragging to the top must seek back"
+        );
+        helper.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), area.x, area.y + 1));
+        assert!(helper.pane_dialog.as_ref().unwrap().v_scroll_drag.is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pane_dialog_only_closes_on_esc() {
+        let root = temp_root("pane_dialog_close");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        helper.new_problem(sample_problem());
+        helper.open_pane_dialog(0, PaneKind::Input);
+
+        let click = |column, row| {
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+
+        helper.handle_event(click(2, 2));
+        assert!(helper.pane_dialog.is_some(), "a click inside must not close the dialog");
+        helper.handle_event(click(90, 28));
+        assert!(helper.pane_dialog.is_some(), "a click outside must not close the dialog");
+        helper.handle_event(key(KeyCode::Enter));
+        assert!(helper.pane_dialog.is_some(), "Enter must not close the dialog");
+        helper.handle_event(key(KeyCode::Char('q')));
+        assert!(helper.pane_dialog.is_some(), "q must not close the dialog");
+
+        helper.handle_event(key(KeyCode::Esc));
+        assert!(helper.pane_dialog.is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn paged_got_dialog_keeps_the_diff_and_reads_pages() {
+        let root = temp_root("got_dialog_paged");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        helper.new_problem(sample_problem());
+        let output = (0..20_001)
+            .map(|index| format!("line-{index:05}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        helper.tc_list.testcases[0].set_result(CaseVerdict::WA { ms: 1 }, output);
+        helper.open_pane_dialog(0, PaneKind::Got);
+
+        let dialog = helper.pane_dialog.as_ref().expect("dialog opened");
+        assert!(matches!(dialog.content, DialogContent::Paged { .. }));
+        assert_eq!(dialog.total_lines(), 20_002, "one warning row plus the output");
+        assert_eq!(dialog.visible_lines().len(), GOT_PAGE_LINES);
+        assert!(
+            dialog.visible_lines()[0]
+                .spans
+                .iter()
+                .any(|span| span.style.fg == Some(theme::RED)),
+            "paged WA output still gets its diff"
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let first_screen = (0..buffer.area.height)
+            .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            first_screen.contains("paged view"),
+            "the first page must explain that it is paged:\n{first_screen}"
+        );
+        dump_screen(&terminal);
+
+        helper.set_pane_dialog_scroll(1_000);
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        let dialog = helper.pane_dialog.as_ref().expect("dialog still open");
+        assert_eq!(
+            dialog.visible_lines()[487].to_string(),
+            "line-00999",
+            "the second page must start at line 512 and line up with the scroll"
+        );
+        dump_screen(&terminal);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn safe_wa_output_keeps_its_diff_in_the_dialog() {
+        let root = temp_root("got_dialog_diff");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        helper.new_problem(sample_problem());
+        helper.tc_list.testcases[0].set_result(CaseVerdict::WA { ms: 1 }, "4".into());
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|f| helper.draw(f)).unwrap();
+
+        let rect = helper.tc_list.testcases[0].got_box.rect;
+        let click = || {
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x + 2,
+                row: rect.y + 1,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        helper.handle_event(click());
+        helper.handle_event(click());
+
+        let dialog = helper.pane_dialog.as_ref().expect("double click opens the Got dialog");
+        assert!(dialog.title.starts_with("Got · TestCase 1"));
+        assert!(
+            dialog
+                .visible_lines()
+                .iter()
+                .flat_map(|line| &line.spans)
+                .any(|span| span.style.fg == Some(theme::RED)),
+            "safe WA output keeps its red diff in the dialog"
+        );
+        assert!(dialog.visible_lines().iter().all(|line| !line.to_string().contains("too large")));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn double_click_does_not_open_a_dialog_in_delete_mode() {
+        let root = temp_root("pane_dialog_delete");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        helper.new_problem(sample_problem());
+        helper.handle_event(key(KeyCode::Char('x')));
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|f| helper.draw(f)).unwrap();
+
+        let rect = helper.tc_list.testcases[0].input_box.rect;
+        let click = || {
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x + 2,
+                row: rect.y + 1,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        helper.handle_event(click());
+        helper.handle_event(click());
+        assert!(helper.pane_dialog.is_none(), "delete mode must keep its own modal");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn directory_console_changes_dir() {
         let root = temp_root("dir");
         let fs_ops = FsOps::with_root(root.clone());
@@ -1404,10 +3261,57 @@ mod tests {
         let code_path = helper.new_problem(sample_problem()).unwrap();
 
         let mut fresh = Helper::new(work, &fs_ops);
-        fresh.external_command(Some(code_path.clone()), RunAction::Add);
+        let (_, reply) = fresh.external_command(Some(code_path.clone()), RunAction::Add);
+        assert!(reply.is_ok());
         assert!(matches!(fresh.input_mode, InputMode::Editing));
         assert_eq!(fresh.tc_list.testcases.len(), 3);
         assert!(fresh.active_problem.is_some());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn run_without_stored_cases_uses_a_smoke_case() {
+        let root = temp_root("smoke");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+        assert!(fs_ops.save_config(&UserConfig { language: Language::Python, extra_flags: vec![], ..Default::default() }));
+
+        let code_path = work.join("Solo.py");
+        std::fs::write(&code_path, "print('hi')\n").unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        let (command, reply) = helper.external_command(Some(code_path), RunAction::Run);
+        assert!(reply.is_ok());
+        assert!(matches!(
+            command,
+            Some(PassingCommand::ToRunner(RunnerCommand::RunCode { .. }))
+        ));
+        assert_eq!(helper.tc_list.testcases.len(), 1, "one smoke case is added");
+        assert!(helper.running);
+
+        // A second run reuses that case instead of piling up more.
+        helper.running = false;
+        let (command, reply) = helper.external_command(None, RunAction::Run);
+        assert!(reply.is_ok());
+        assert!(command.is_some());
+        assert_eq!(helper.tc_list.testcases.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn external_command_reports_missing_files() {
+        let root = temp_root("external_missing");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        let (command, reply) = helper.external_command(Some(root.join("nope.cpp")), RunAction::Run);
+        assert!(command.is_none());
+        assert!(reply.unwrap_err().contains("file not found"));
 
         let _ = std::fs::remove_dir_all(&root);
     }

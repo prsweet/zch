@@ -49,15 +49,6 @@ fn main() -> color_eyre::Result<()> {
             }
             return send_command(action, file);
         }
-        Some("submit") => {
-            let file = args.iter().skip(1).find(|a| !a.starts_with('-'));
-            let Some(file) = file else {
-                eprintln!("usage: zch submit <file> [-y]\n");
-                std::process::exit(2);
-            };
-            let yes = args.iter().any(|a| a == "-y" || a == "--yes");
-            return submit_command(Path::new(file), yes);
-        }
         Some("-h" | "--help" | "help") => {
             print_help();
             return Ok(());
@@ -81,8 +72,7 @@ fn print_help() {
          \x20                              saves received problems to the cwd)\n\
          \x20 zch send <action> [file]     talk to a running instance\n\
          \x20                              actions: r=run · e=edit · a=add · s=submit\n\
-         \x20 zch submit <file> [-y]       submit from this terminal (confirmation,\n\
-         \x20                              -y skips it) — streams the verdict here\n\n\
+         \x20                              (submissions are confirmed and tracked in the TUI)\n\n\
          ENV:\n\
          \x20 ZCH_PORT   override the listener port (default 10043)\n"
     );
@@ -105,145 +95,25 @@ fn send_command(action: &str, file: Option<&str>) -> color_eyre::Result<()> {
     let mut stream = std::net::TcpStream::connect(&address).map_err(|e| {
         color_eyre::eyre::eyre!("listener not running on {address} ({e}) — start zch first")
     })?;
-    stream.set_read_timeout(Some(Duration::from_secs(90)))?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     stream.write_all(format!("GET {path} HTTP/1.0\r\nHost: {address}\r\n\r\n").as_bytes())?;
 
     let mut response = String::new();
     let _ = stream.read_to_string(&mut response);
-    if response.contains(" 200 ") || response.starts_with("HTTP/1.0 200") {
+
+    let (head, body) = response.split_once("\r\n\r\n").unwrap_or((response.as_str(), ""));
+    let status = head.lines().next().unwrap_or_default();
+    let body = body.trim();
+    if status.contains(" 200 ") {
+        if !body.is_empty() {
+            println!("{body}");
+        }
         Ok(())
+    } else if body.is_empty() {
+        color_eyre::eyre::bail!("listener rejected the command ({status})")
     } else {
-        color_eyre::eyre::bail!("listener rejected the command (no HTTP 200 response)")
+        color_eyre::eyre::bail!("{body}")
     }
-}
-
-/// Submit from a terminal tab (used by Zed tasks): shows every detail, asks for
-/// confirmation, then streams the Safari verdict into this terminal.
-fn submit_command(file: &Path, yes: bool) -> color_eyre::Result<()> {
-    use std::io::{self, Write};
-
-    use ratatui::crossterm::{
-        event::{Event, KeyCode, read},
-        style::{Color as TermColor, Stylize},
-        terminal::{disable_raw_mode, enable_raw_mode},
-    };
-
-    let fs_ops = FsOps::new();
-    let (config, _) = fs_ops.load_config();
-    let stem = file
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let saved_problem = fs_ops.load_problem_by_stem(&stem).ok();
-
-    let payload = crate::core::SubmitConfig {
-        language: config.language,
-        url: saved_problem.as_ref().map(|p| p.url.clone()).unwrap_or_default(),
-        file_path: file.to_path_buf(),
-    };
-
-    let info = crate::core::submitter::describe(&payload)?;
-
-    let detail = |label: &str, value: String, color: TermColor| {
-        println!(
-            "  {}{}{}",
-            label.dark_grey(),
-            " ".repeat(13usize.saturating_sub(label.len())),
-            value.with(color)
-        );
-    };
-
-    println!();
-    println!("  {}", "◆  Submission".blue().bold());
-    println!("  {}", "─".repeat(62).dark_grey());
-    detail(
-        "Problem",
-        saved_problem.as_ref().map(|p| p.name.clone()).unwrap_or_else(|| stem.clone()),
-        TermColor::White,
-    );
-    detail("File", info.file_name.clone(), TermColor::Cyan);
-    detail("Platform", info.platform.to_string(), TermColor::Yellow);
-    detail("Problem ID", info.problem_code.clone(), TermColor::Magenta);
-    detail("Submit URL", info.submit_url.clone(), TermColor::Blue);
-    detail(
-        "Language",
-        format!("{}  (id {})", info.language, info.language_id),
-        TermColor::Green,
-    );
-    detail(
-        "Browser",
-        if info.safari_available {
-            info.browser.to_string()
-        } else {
-            format!("{} — not installed!", info.browser)
-        },
-        if info.safari_available { TermColor::Magenta } else { TermColor::Red },
-    );
-    if let Some(problem) = &saved_problem {
-        detail(
-            "Local tests",
-            format!(
-                "{} cases · TL {}ms",
-                problem.test_cases.len(),
-                problem.effective_time_limit()
-            ),
-            TermColor::DarkGrey,
-        );
-    }
-    println!();
-
-    if !yes {
-        print!(
-            "  Press {} to submit  ·  {} to cancel ",
-            "Enter".green().bold(),
-            "Backspace".red().bold()
-        );
-        io::stdout().flush()?;
-
-        if enable_raw_mode().is_err() {
-            color_eyre::eyre::bail!("cannot prompt for confirmation here — re-run with --yes/-y");
-        }
-
-        let confirmed = loop {
-            match read() {
-                Ok(Event::Key(key)) => match key.code {
-                    KeyCode::Enter => break true,
-                    KeyCode::Backspace | KeyCode::Esc => break false,
-                    _ => {}
-                },
-                Ok(_) => {}
-                Err(e) => {
-                    let _ = disable_raw_mode();
-                    return Err(e.into());
-                }
-            }
-        };
-        let _ = disable_raw_mode();
-        println!();
-
-        if !confirmed {
-            println!("  {}", "Submission cancelled.".yellow());
-            return Ok(());
-        }
-    }
-
-    println!();
-    let result = crate::core::submitter::submit(&payload, |msg| {
-        println!("  {} {}", "·".dark_grey(), msg);
-    })?;
-
-    println!();
-    match crate::core::submitter::classify(&result) {
-        crate::core::submitter::Outcome::Accepted => {
-            println!("  {} {}", "✔".green().bold(), result.green().bold())
-        }
-        crate::core::submitter::Outcome::Rejected | crate::core::submitter::Outcome::Failed => {
-            println!("  {} {}", "✘".red().bold(), result.red())
-        }
-    }
-    println!();
-
-    Ok(())
 }
 
 fn run_tui() -> color_eyre::Result<()> {
@@ -304,15 +174,20 @@ fn run_app(terminal: &mut DefaultTerminal, helper: &mut Helper) -> color_eyre::R
                             open_in_zed(&path);
                         }
                     }
-                    HelperCommand::Command { file, action } => {
-                        if let Some(reply) = helper.external_command(file, action) {
-                            let _ = main_tx.send(reply);
+                    HelperCommand::Command { file, action, reply } => {
+                        let (command, outcome) = helper.external_command(file, action);
+                        let _ = reply.send(outcome);
+                        if let Some(command) = command {
+                            let _ = main_tx.send(command);
                         }
                     }
+                    HelperCommand::RunPhase { run_id, message } => helper.run_phase(run_id, message),
                     HelperCommand::CaseResult { run_id, index, verdict } => {
                         helper.apply_case_result(run_id, index, verdict)
                     }
-                    HelperCommand::RunFinished { run_id } => helper.run_finished(run_id),
+                    HelperCommand::RunFinished { run_id, elapsed_ms } => {
+                        helper.run_finished(run_id, elapsed_ms)
+                    }
                     HelperCommand::SubmitStatus { id, message } => helper.submit_status(id, message),
                     HelperCommand::SubmitFinished { id, result } => helper.submit_finished(id, result),
                     HelperCommand::Error(error) => helper.set_error(error),

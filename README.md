@@ -15,11 +15,11 @@ A single Rust binary that receives problems from the [Competitive Companion](htt
 * 🖥️ **Live TUI dashboard** — directory bar, message console, verdict cards, and a footer that always shows every key.
 * ✔️ **Instant verdicts** — each test case gets a chip (`✔ AC · 4ms`, `✘ WA`, `⏱ TLE`, `✘ RE`, `✘ CE`) and auto-collapses on AC; on WA the **Got** box marks the exact characters that differ in red.
 * 📥 **Auto-parses problems** — payloads are captured on `127.0.0.1:10043`; the file is created from `~/.zch/boilerplate.cpp` with a `// URL:` header, tests live in `~/.zch/.tc/`, and the file opens in Zed automatically.
-* ⚡ **Blazing fast execution** — compile once, replay every case with 1ms polling, per-case timing, and hard TLE kills.
-* 🤖 **One-key Codeforces submissions** — a confirmation modal shows every detail, then async verdicts stream into the **Submissions bar** (`⠹ submitting → ✔ ACCEPTED`); Safari tabs are tracked by URL (**INTERRUPTED** / **TIMED OUT** handled) and CAPTCHAs raise the window automatically. `zch submit` works from the terminal too.
-* 🎛️ **Command palette from Zed** — Zed tasks drive the running TUI over HTTP (`send r`, `send s`, …) with the active `${ZED_FILE}`.
-* 📁 **Live directory switching** — `cd`, `ls`, `pwd` console with TAB path completion; new problems are saved wherever you point it.
-* 🧩 **Multi-language** — C++17/20/23, Python 3, Java; language + flags persist in `~/.zch/config.json` via the `c` menu.
+* ⚡ **Blazing fast execution** — compiles once and caches the binary by source hash + flags, so unchanged code replays every case instantly with 1ms polling, per-case timing, and hard TLE kills. Live `compiling… → running case i/n` phases show where the time goes.
+* 🤖 **One-key Codeforces submissions** — a confirmation modal shows every detail, then async verdicts stream into the **Submissions bar** (`⠹ submitting · 12s → ✔ ACCEPTED`); Safari tabs are tracked by URL (**INTERRUPTED** / **TIMED OUT** / hard 5-minute timeout handled) and CAPTCHAs raise the window automatically. Everything stays inside the TUI.
+* 🎛️ **Command palette from Zed** — Zed tasks drive the running TUI over HTTP (`send r`, `send s`, …) with the active `${ZED_FILE}`; `zch send` reports real success/failure reasons.
+* 📁 **Live directory switching** — `cd`, `ls`, `pwd` console with TAB completion cycling and `↑`/`↓` command history; new problems are saved wherever you point it.
+* 🧩 **Multi-language, no hidden flags** — C++, Python 3, Java. Nothing is added behind your back: `-O2`, `-std=c++20`, `-include-pch`, … are entered as individually validated tags in the `c` menu (each language keeps its own list), and the Codeforces language id follows your `-std=` tag.
 
 ---
 
@@ -79,11 +79,11 @@ Append to `~/.config/zed/tasks.json` (press `cmd+shift+R` to spawn tasks):
   },
   {
     "label": "CP: Submit to Codeforces",
-    "command": "zch submit \"${ZED_FILE}\"",
-    "use_new_terminal": true,
-    "allow_concurrent_runs": true,
-    "reveal": "always",
-    "hide": "never"
+    "command": "zch send s \"${ZED_FILE}\"",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "never",
+    "hide": "always"
   }
 ]
 ```
@@ -123,33 +123,42 @@ Press **`cmd-r`** inside your problems folder (or run `zch` in a terminal). The 
 
 ### 2. Receive a problem
 
-Click the **Competitive Companion** extension on any Codeforces problem page. The file is created in the current directory, saved to the test database, and opened in Zed automatically.
+Click the **Competitive Companion** extension on any Codeforces problem page. The file is created in the current directory, saved to the test database, and opened in Zed automatically. Problems that sanitize to the same filename (for example `A. Sum` in two different contests) get a short URL suffix, so their test databases and compiled binaries never overwrite each other.
 
 ### 3. Test & submit from the TUI
 
 | Key | Action |
 | --- | --- |
-| `r` | compile & run all test cases |
+| `r` | compile (cached when unchanged) & run all test cases |
 | `a` | add a custom test case |
+| `x` | delete a test case: `Tab`/`Shift+Tab` selects, `Enter` confirms |
 | `e` | edit existing test cases |
 | `s` | submit to Codeforces (confirmation modal → Enter submits / Backspace cancels) |
-| `d` | console: `cd <path>` · `ls` · `pwd` (TAB completes paths) |
-| `c` | config: language + extra compile flags |
+| `d` | console: `cd <path>` · `ls` · `pwd` (`TAB` completes and cycles, `↑`/`↓` recall history) |
+| `c` | config: language + validated compile-flag tags (`x` selects, `Tab`/`Shift+Tab` picks) |
+| `Esc` | cancel a running test, if one is in flight |
 | `q` | quit |
 
-While editing, `Tab` switches between **Input** / **Expected** (and wraps to the previous/next case with `Shift+Tab`), `Esc` saves.
+While editing, `Tab` switches between **Input** / **Expected** (and wraps to the previous/next case with `Shift+Tab`), `Esc` saves. Both edit and delete modes expand every case, so nothing is hidden behind a collapsed card. `Tab`/`Shift+Tab` are the only focus-navigation keys; arrow keys never move focus or walk a list. The active pane is kept inside the viewport and scrolls internally when the text is longer, so the cursor never runs off-screen; pane heights do not change when you switch focus. The mouse wheel scrolls the focused textarea, and anywhere else it scrolls the case list. Scrollbars are draggable too: the case list, submissions panel, config flags, and the pane dialog (both axes) support wheel, track click, and smooth thumb drag.
+
+`r` also works for a file with no stored cases: it adds one in-memory smoke case (empty input/expected) so you still get a compile + crash check. Only one run can be active; `Esc`, editing, deleting, or receiving a new problem cancels it and kills the whole child process group instead of leaving it running in the background.
+
+In the config menu (`c`), extra flags are **tags**, not one free-form line: type a flag and press `Enter` to add it. Tags are checked (they must start with `-`, duplicates and unknown `-std=` versions such as `-std=c++1000` are rejected) and stored per language in `~/.zch/config.json`, so switching the language switches the flag list with it. A value that belongs to a flag (`-include-pch /path/to.pch`) is added as its own tag right after that flag. The list shows one tag per line — up to eight at once, with a draggable scrollbar. Before `x` the list is read-only; `x` starts the select → `Enter` → confirm → `Enter` flow and `Tab`/`Shift+Tab` walks the tags. Deleting either half of a `-include-pch` pair removes both halves. No `-std`, `-O2`, or warning flags are added implicitly; the Codeforces language id is derived from the last `-std=` tag (C++17 → 54, C++20 → 89, C++23 → 91).
+
+Pressing `x` on a test case enters delete mode: every case expands, every pane of the focused one turns red, `Tab`/`Shift+Tab` walk the list, `Enter` opens a confirmation modal showing the case's input and expected output, and only `Enter` there deletes — `Backspace` goes back, `Esc` cancels. Double-click **Input**, **Expected**, or **Got** to open that pane in a large scrollable dialog with draggable vertical and horizontal scrollbars; safe output keeps its red diff, huge output opens a paged view with a per-page diff, and `Esc` closes it. The final run summary reports `compiled in Xms` or `compile skipped` and the runner-measured total wall time, so both compile and run cost are never hidden.
+
+Outside edit mode panes truncate instead of scrolling: raw output is cut to a ~24 KB preview as soon as a result arrives, the pane shows at most 300 lines / 24k characters, and huge WA output skips the character diff in favor of a plain preview plus an `… output truncated` / `… diff skipped for large output` note. Lines wider than the pane end in `…`. While editing, the focused pane scrolls internally, and the large pane dialog scrolls with the wheel, `↑`/`↓`/`←`/`→`/`PgUp`/`PgDn`, or by clicking or dragging its vertical or horizontal scrollbar; it keeps the full output (with the full diff for safe WA results) in memory up to 10 MB / 20,000 lines. Anything larger is spilled to a temp file and read page by page, with the diff recomputed for the visible page; only a spill failure falls back to the bounded preview and warning.
 
 ### 4. Test & submit from Zed
 
-* **Run (`cmd-'`)** — asks the running TUI to load `${ZED_FILE}` and run it.
-* **Submit (`cmd-enter`)** — opens a dedicated terminal tab that shows every submission detail (platform, problem ID, URL, language, browser, local tests) and waits for **`Enter`** to submit or **`Backspace`** to cancel. The verdict (and any CAPTCHA warning) streams into that tab.
+* **Run (`cmd-'`)** — asks the running TUI to load `${ZED_FILE}` and run it. If the file has no stored cases, the TUI smoke-runs it with empty input.
+* **Submit (`cmd-enter`)** — asks the running TUI to load `${ZED_FILE}` and open the submission confirmation modal. `Enter` submits from there, `Backspace` cancels, and progress stays in the Submissions bar.
 
-The `send` subcommand talks to the TUI over HTTP, while `submit` runs standalone in its own terminal:
+The `send` subcommand talks to the TUI over HTTP and prints the real result (or the reason it was refused):
 
 ```bash
 zch send r /path/to/Problem.cpp   # run
-zch send s /path/to/Problem.cpp   # submit (confirmation modal inside the TUI)
-zch submit /path/to/Problem.cpp   # submit here (Enter/Backspace prompt, -y to skip)
+zch send s /path/to/Problem.cpp   # open the confirmation modal in the TUI
 ```
 
 Set `ZCH_PORT` to run on a different port than `10043`.
@@ -169,14 +178,14 @@ src/
   main.rs               — event loop: one channel, four actors
   helper.rs             — UI state machine (input modes, commands, verdicts)
   components/           — ratatui widgets
-    dir_terminal.rs     — working-directory console (cd/ls/pwd + completion)
+    dir_terminal.rs     — working-directory console (cd/ls/pwd, completion cycling, history)
     tc_list.rs          — scrollable test case list with verdict chips
     testcase.rs         — one case: input / expected / got, diff highlighting
-    config.rs           — language + compile flags popup
+    config.rs           — language + validated flag-tag popup
     splash.rs           — empty-state screen
   core/
     receiver.rs         — Competitive Companion HTTP listener (:10043) + command API
-    runner.rs           — compile + run all cases (timings, TLE kills)
+    runner.rs           — content-hash compile cache + run all cases (timings, TLE kills)
     submitter.rs        — Safari AppleScript automation + platform detection
     fs_ops.rs           — boilerplate, test DB, config, binary pruning
   error.rs              — shared error type
@@ -199,21 +208,36 @@ macOS security scans (`syspolicyd`) add ~200ms of lag when running newly compile
 
 ### 2. Ultra-fast precompiled headers (PCH) 🔥
 
-Compiling `#include <bits/stdc++.h>` costs 1.5s–3.0s per compile. A PCH drops this **under 0.20s**.
+Compiling `#include <bits/stdc++.h>` is usually the bulk of a cold run; a
+precompiled header shared between runs cuts it down noticeably (roughly
+0.3s → 0.1s on an M-series Mac). zch itself adds no flags — a PCH only helps if
+you pass `-include-pch` yourself.
 
-**For Clang (macOS default):**
+**For Clang (macOS default), with a C++23 PCH:**
 
 ```bash
-clang++ -std=c++23 -O2 -x c++-header /usr/local/include/bits/stdc++.h -o /usr/local/include/bits/stdc++.h.pch
+clang++ -std=c++23 -x c++-header /usr/local/include/bits/stdc++.h \
+  -o /usr/local/include/bits/stdc++.h.pch
 ```
 
-Then open the config menu (`c`) and add to **extra compile flags**:
+`/usr/local/include/bits/stdc++.h` is not shipped by macOS; create it (the
+[std-with-pbds](https://github.com/prsweet/std-with-pbds.git) repo does) and
+expect to need `sudo` for `/usr/local/include`.
+
+Then open the config menu (`c`), switch to the flags field, and add these tags
+in this order (one `Enter` each):
 
 ```
--include-pch /usr/local/include/bits/stdc++.h.pch
+-std=c++23
+-O2
+-include-pch
+/usr/local/include/bits/stdc++.h.pch
 ```
 
-The flag is appended to `g++ -std=c++23 -O2 -Wall -Wextra …` for every compile.
+The standard, architecture, and compiler version must match the PCH exactly;
+after an Xcode/Clang update, rebuild it. Homebrew GCC does **not** accept a
+Clang-built PCH, so drop `-include-pch` (and rebuild with GCC) if `g++` is real
+GCC.
 
 ### 3. Fast policy-based data structures (PBDS) on Clang 🌲
 

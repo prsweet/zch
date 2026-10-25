@@ -12,11 +12,21 @@ use ratatui_textarea::TextArea;
 use crate::components::{Message, block, icons, theme};
 
 const MSG_MAX_HEIGHT: u16 = 10;
+const HISTORY_LIMIT: usize = 200;
+
+struct Completion {
+    dir_part: String,
+    matches: Vec<String>,
+    next: usize,
+}
 
 pub struct DirTerminal {
     pub cur_dir: PathBuf,
     pub input_area: TextArea<'static>,
     pub output: Option<Message>,
+    history: Vec<String>,
+    history_cursor: Option<usize>,
+    completion: Option<Completion>,
 }
 
 impl DirTerminal {
@@ -25,6 +35,9 @@ impl DirTerminal {
             cur_dir: initial_dir,
             input_area: TextArea::default(),
             output: None,
+            history: Vec::new(),
+            history_cursor: None,
+            completion: None,
         }
     }
 
@@ -64,7 +77,7 @@ impl DirTerminal {
         } else {
             let dir_panel = Paragraph::new(format!("  {} ", self.cur_dir.display()))
                 .style(Style::new().fg(theme::TEXT))
-                .block(dir_block.title(" Working Directory "))
+                .block(dir_block.title(" [Working Directory] "))
                 .wrap(Wrap { trim: true });
             frame.render_widget(dir_panel, dir_area);
         }
@@ -79,8 +92,9 @@ impl DirTerminal {
         let msg_panel = Paragraph::new(msg.text.clone())
             .style(msg.color)
             .block(
-                block(Some(" Console "))
+                block(Some(" [Console] "))
                     .border_style(theme::BORDER)
+                    .title_alignment(Right)
                     .title_style(Style::new().fg(theme::PURPLE).bold()),
             )
             .wrap(Wrap { trim: false });
@@ -89,14 +103,22 @@ impl DirTerminal {
 
     pub fn handle_event(&mut self, key: KeyEvent) -> bool {
         match key.code {
-            KeyCode::Enter => self.execute(),
+            KeyCode::Enter => {
+                self.execute();
+                self.history_cursor = None;
+                self.completion = None;
+            }
             KeyCode::Tab => self.autocomplete(),
+            KeyCode::Up => self.history_up(),
+            KeyCode::Down => self.history_down(),
             KeyCode::Esc => {
                 self.output = None;
                 return true;
             }
             _ => {
                 self.input_area.input(key);
+                self.history_cursor = None;
+                self.completion = None;
             }
         }
         false
@@ -108,6 +130,13 @@ impl DirTerminal {
 
         if cmd.is_empty() {
             return;
+        }
+
+        if self.history.last() != Some(&cmd) {
+            self.history.push(cmd.clone());
+            if self.history.len() > HISTORY_LIMIT {
+                self.history.remove(0);
+            }
         }
 
         if cmd == "cd" || cmd.starts_with("cd ") {
@@ -149,6 +178,17 @@ impl DirTerminal {
     }
 
     fn autocomplete(&mut self) {
+        // Repeated Tab presses cycle through every match after the first press
+        // completed the common prefix.
+        if let Some(completion) = self.completion.take() {
+            let name = completion.matches[completion.next].clone();
+            let next = (completion.next + 1) % completion.matches.len();
+            self.set_input(&format!("cd {}{name}/", completion.dir_part));
+            self.show_matches(&completion.matches, &completion.dir_part);
+            self.completion = Some(Completion { next, ..completion });
+            return;
+        }
+
         let line = self.input_area.lines().join("");
 
         let Some(prefix) = line.strip_prefix("cd ") else { return };
@@ -188,20 +228,58 @@ impl DirTerminal {
         }
 
         let extension = common_extension(&matches);
-        self.input_area = TextArea::default();
-        self.input_area.insert_str(format!("cd {dir_part}{extension}"));
+        self.set_input(&format!("cd {dir_part}{extension}"));
+        self.history_cursor = None;
 
         if matches.len() == 1 {
             self.input_area.insert_str("/");
             self.output = None;
         } else {
-            let list = matches
-                .iter()
-                .map(|name| format!("{} {name}/", icons::FOLDER))
-                .collect::<Vec<_>>()
-                .join("   ");
-            self.set_message(theme::CYAN, list);
+            self.show_matches(&matches, dir_part);
+            self.completion = Some(Completion { dir_part: dir_part.to_string(), matches, next: 0 });
         }
+    }
+
+    fn show_matches(&mut self, matches: &[String], dir_part: &str) {
+        let list = matches
+            .iter()
+            .map(|name| format!("{} {dir_part}{name}/", icons::FOLDER))
+            .collect::<Vec<_>>()
+            .join("   ");
+        self.set_message(theme::CYAN, list);
+    }
+
+    fn set_input(&mut self, text: &str) {
+        self.input_area = TextArea::default();
+        if !text.is_empty() {
+            self.input_area.insert_str(text);
+        }
+    }
+
+    fn history_up(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let index = match self.history_cursor {
+            Some(0) => 0,
+            Some(index) => index - 1,
+            None => self.history.len() - 1,
+        };
+        self.history_cursor = Some(index);
+        self.set_input(&self.history[index].clone());
+        self.completion = None;
+    }
+
+    fn history_down(&mut self) {
+        let Some(index) = self.history_cursor else { return };
+        if index + 1 < self.history.len() {
+            self.history_cursor = Some(index + 1);
+            self.set_input(&self.history[index + 1].clone());
+        } else {
+            self.history_cursor = None;
+            self.set_input("");
+        }
+        self.completion = None;
     }
 }
 
@@ -229,6 +307,10 @@ mod tests {
 
     fn tab() -> KeyEvent {
         KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
     }
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -286,6 +368,57 @@ mod tests {
         dir.input_area.insert_str(format!("cd {}/pro", root.display()));
         dir.handle_event(tab());
         assert_eq!(typed(&dir), format!("cd {}/projects/", root.display()));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tab_cycles_through_ambiguous_matches() {
+        let root = temp_dir("cycle");
+        fs::create_dir_all(root.join("cp/questions")).unwrap();
+        fs::create_dir_all(root.join("cp/quiz")).unwrap();
+        let mut dir = DirTerminal::new(root.clone());
+
+        dir.input_area.insert_str("cd cp/q");
+        dir.handle_event(tab());
+        assert_eq!(typed(&dir), "cd cp/qu");
+
+        dir.handle_event(tab());
+        assert_eq!(typed(&dir), "cd cp/questions/");
+        dir.handle_event(tab());
+        assert_eq!(typed(&dir), "cd cp/quiz/");
+        dir.handle_event(tab());
+        assert_eq!(typed(&dir), "cd cp/questions/", "cycling wraps around");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn up_and_down_recall_command_history() {
+        let root = temp_dir("history");
+        let mut dir = DirTerminal::new(root.clone());
+
+        dir.input_area.insert_str("ls");
+        dir.handle_event(key(KeyCode::Enter));
+        dir.input_area.insert_str("pwd");
+        dir.handle_event(key(KeyCode::Enter));
+
+        dir.handle_event(key(KeyCode::Up));
+        assert_eq!(typed(&dir), "pwd");
+        dir.handle_event(key(KeyCode::Up));
+        assert_eq!(typed(&dir), "ls");
+        dir.handle_event(key(KeyCode::Up));
+        assert_eq!(typed(&dir), "ls", "oldest entry stays put");
+
+        dir.handle_event(key(KeyCode::Down));
+        assert_eq!(typed(&dir), "pwd");
+        dir.handle_event(key(KeyCode::Down));
+        assert_eq!(typed(&dir), "", "past the newest entry clears the box");
+
+        // Typing after recalling leaves history traversal.
+        dir.handle_event(key(KeyCode::Up));
+        dir.handle_event(key(KeyCode::Char('x')));
+        assert_eq!(typed(&dir), "pwdx");
 
         let _ = fs::remove_dir_all(&root);
     }

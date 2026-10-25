@@ -5,7 +5,7 @@ use std::{
     process::{Command, Stdio},
     sync::mpsc::{Sender, channel},
     thread,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
@@ -20,6 +20,7 @@ use crate::{
 };
 
 const APP_NAME: &str = "Safari";
+const SUBMISSION_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub fn spawn_submitter(main_tx: Sender<PassingCommand>) -> Sender<SubmitterCommand> {
     let (tx, rx) = channel::<SubmitterCommand>();
@@ -54,7 +55,7 @@ pub enum Outcome {
 }
 
 /// Judge verdict of the final `submitter::submit` string. Shared by the TUI
-/// submission bar and the `submit` CLI so both color results identically.
+/// submission bar and result classification.
 pub fn classify(result: &str) -> Outcome {
     let lower = result.to_lowercase();
     if lower.contains("accepted") || lower.contains(": ac") {
@@ -108,7 +109,7 @@ fn plan(config: &SubmitConfig) -> Result<(SubmissionInfo, Platform), AppError> {
         submit_url: platform.submit_url.clone(),
         problem_code: platform.problem_code.clone(),
         language: language.label(),
-        language_id: language.cf_id(),
+        language_id: language.cf_id(&config.extra_flags),
         file_name: config
             .file_path
             .file_name()
@@ -536,7 +537,7 @@ fn safari_installed() -> bool {
 }
 
 /// Run a full submission, calling `notify` with human-readable progress lines.
-/// Used by both the TUI worker and the `submit` CLI subcommand.
+/// Used by the TUI submitter worker.
 pub fn submit(
     config: &SubmitConfig,
     notify: impl Fn(String) + Send + Clone + 'static,
@@ -553,7 +554,7 @@ pub fn submit(
         .map_err(|e| AppError::Io(format!("cannot read {}: {e}", config.file_path.display())))?;
 
     let language = config.language;
-    let lang_id = language.cf_id();
+    let lang_id = language.cf_id(&config.extra_flags);
 
     let clean_code = strip_metadata(&code);
     let code_b64 = BASE64.encode(clean_code.as_bytes());
@@ -621,23 +622,72 @@ fn run_applescript(
             .spawn()
             .map_err(|e| AppError::Io(format!("failed to run osascript: {e}")))?;
 
+        // Drain both pipes on their own threads: a full stderr pipe would block
+        // osascript and the timeout below would never fire.
         let stderr = child.stderr.take().expect("stderr piped");
         let notify_thread = notify.clone();
-        let reader = thread::spawn(move || {
+        let stderr_reader = thread::spawn(move || {
+            let mut buffer = String::new();
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                buffer.push_str(&line);
+                buffer.push('\n');
                 if let Some(msg) = status_for_line(line.trim()) {
                     notify_thread(msg);
                 }
             }
+            buffer
+        });
+        let stdout = child.stdout.take().expect("stdout piped");
+        let stdout_reader = thread::spawn(move || {
+            let mut buffer = String::new();
+            let _ = BufReader::new(stdout).read_to_string(&mut buffer);
+            buffer
         });
 
-        let mut stdout = String::new();
-        if let Some(mut out) = child.stdout.take() {
-            let _ = out.read_to_string(&mut stdout);
+        let started = Instant::now();
+        let outcome = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(Some(status)),
+                Ok(None) => {
+                    if started.elapsed() >= SUBMISSION_TIMEOUT {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break Ok(None);
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err(e);
+                }
+            }
+        };
+
+        let stderr_text = stderr_reader.join().unwrap_or_default();
+        let stdout_text = stdout_reader.join().unwrap_or_default();
+
+        match outcome {
+            Err(e) => Err(AppError::Io(format!("failed to watch osascript: {e}"))),
+            Ok(None) => Err(AppError::Io(format!(
+                "submission timed out after {}s — the judge never answered",
+                SUBMISSION_TIMEOUT.as_secs()
+            ))),
+            Ok(Some(status)) if !status.success() => {
+                let detail = if stderr_text.trim().is_empty() {
+                    stdout_text.trim()
+                } else {
+                    stderr_text.trim()
+                };
+                let detail = detail.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("").trim();
+                Err(AppError::Io(if detail.is_empty() {
+                    format!("osascript exited with {status}")
+                } else {
+                    format!("osascript exited with {status}: {detail}")
+                }))
+            }
+            Ok(Some(_)) => Ok(stdout_text.trim().to_string()),
         }
-        let _ = child.wait();
-        let _ = reader.join();
-        Ok(stdout.trim().to_string())
     })();
 
     let _ = fs::remove_file(&fill_path);

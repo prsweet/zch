@@ -1,4 +1,9 @@
-use std::{path::{Path, PathBuf}, process::Output};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    process::Output,
+    sync::{Arc, atomic::AtomicBool, mpsc::Sender},
+};
 
 use derive_name::VariantName;
 use serde::{Deserialize, Serialize};
@@ -38,32 +43,22 @@ impl ActiveProblem {
     }
 }
 
-#[derive(Debug, Serialize, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
 #[derive(Default)]
 pub enum Language {
-    Cpp17,
-    Cpp20,
-    #[serde(alias = "Cpp")]
+    #[serde(alias = "Cpp17", alias = "Cpp20", alias = "Cpp23")]
     #[default]
-    Cpp23,
+    Cpp,
     Python,
     Java,
 }
 
 impl Language {
-    pub const ALL: [Language; 5] = [
-        Language::Cpp23,
-        Language::Cpp20,
-        Language::Cpp17,
-        Language::Python,
-        Language::Java,
-    ];
+    pub const ALL: [Language; 3] = [Language::Cpp, Language::Python, Language::Java];
 
     pub fn label(&self) -> &'static str {
         match self {
-            Language::Cpp17 => "C++17",
-            Language::Cpp20 => "C++20",
-            Language::Cpp23 => "C++23",
+            Language::Cpp => "C++",
             Language::Python => "Python 3",
             Language::Java => "Java",
         }
@@ -73,18 +68,21 @@ impl Language {
         match self {
             Language::Python => "py",
             Language::Java => "java",
-            _ => "cpp",
+            Language::Cpp => "cpp",
         }
     }
 
-    /// Submit language id on Codeforces.
-    pub fn cf_id(&self) -> &'static str {
+    /// Submit language id on Codeforces. The standard version is not part of
+    /// the language any more — it comes from the user's `-std=` flag.
+    pub fn cf_id(&self, flags: &[String]) -> &'static str {
         match self {
-            Language::Cpp17 => "54",
-            Language::Cpp20 => "89",
-            Language::Cpp23 => "91",
             Language::Python => "31",
             Language::Java => "36",
+            Language::Cpp => match std_from_flags(flags) {
+                Some(std) if std >= 23 => "91",
+                Some(std) if std >= 20 => "89",
+                _ => "54",
+            },
         }
     }
 
@@ -98,19 +96,14 @@ impl Language {
         Self::ALL[(idx + Self::ALL.len() - 1) % Self::ALL.len()]
     }
 
-    /// Compilation step, `None` for interpreted languages.
+    /// Compilation step, `None` for interpreted languages. No flags are added
+    /// implicitly — the user's extra flags are passed through verbatim.
     pub fn compile_cmd(&self, src: &Path, bin: &Path, extra_flags: &[String]) -> Option<(String, Vec<String>)> {
         let src = src.to_string_lossy().to_string();
         let bin = bin.to_string_lossy().to_string();
         match self {
-            Language::Cpp17 | Language::Cpp20 | Language::Cpp23 => {
-                let std = match self {
-                    Language::Cpp17 => "-std=c++17",
-                    Language::Cpp20 => "-std=c++20",
-                    _ => "-std=c++23",
-                };
-                let mut args = vec![std.to_string(), "-O2".to_string(), "-Wall".to_string(), "-Wextra".to_string()];
-                args.extend(extra_flags.iter().cloned());
+            Language::Cpp => {
+                let mut args = extra_flags.to_vec();
                 args.extend([src, "-o".to_string(), bin]);
                 Some(("g++".to_string(), args))
             }
@@ -143,6 +136,35 @@ impl Language {
     }
 }
 
+/// The standard version encoded in a `-std=c++20` / `-std=gnu++17` /
+/// `--std=c++2b` flag. Unknown versions return `None`, so a typo can never be
+/// mistaken for a real standard.
+pub(crate) fn std_from_flag(flag: &str) -> Option<u32> {
+    let lower = flag.to_ascii_lowercase();
+    let value = lower
+        .strip_prefix("-std=")
+        .or_else(|| lower.strip_prefix("--std="))?;
+    let version = value
+        .strip_prefix("gnu++")
+        .or_else(|| value.strip_prefix("c++"))?;
+    match version {
+        "98" => Some(98),
+        "03" => Some(3),
+        "0x" | "11" => Some(11),
+        "1y" | "14" => Some(14),
+        "1z" | "17" => Some(17),
+        "2a" | "20" => Some(20),
+        "2b" | "23" => Some(23),
+        "2c" | "26" => Some(26),
+        _ => None,
+    }
+}
+
+/// Last valid `-std=` flag wins.
+fn std_from_flags(flags: &[String]) -> Option<u32> {
+    flags.iter().rev().find_map(|flag| std_from_flag(flag))
+}
+
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[derive(Default)]
@@ -151,18 +173,47 @@ pub struct UserConfig {
     pub language: Language,
     #[serde(alias = "fallback_flags", default)]
     pub extra_flags: Vec<String>,
+    #[serde(default)]
+    pub flags_by_language: HashMap<Language, Vec<String>>,
+}
+
+impl UserConfig {
+    pub fn normalize(&mut self) {
+        if self.flags_by_language.is_empty() {
+            self.flags_by_language.insert(self.language, self.extra_flags.clone());
+            return;
+        }
+        match self.flags_by_language.get(&self.language) {
+            Some(flags) => self.extra_flags = flags.clone(),
+            None => {
+                self.flags_by_language.insert(self.language, self.extra_flags.clone());
+            }
+        }
+    }
+
+    pub fn active_flags(&self) -> &[String] {
+        self.flags_by_language
+            .get(&self.language)
+            .map(Vec::as_slice)
+            .unwrap_or(&self.extra_flags)
+    }
 }
 
 
 #[derive(Debug, Clone)]
 pub struct SubmitConfig {
     pub language: Language,
+    pub extra_flags: Vec<String>,
     pub url: String,
     pub file_path: PathBuf,
 }
 
 pub enum RunnerCommand {
-    RunCode { problem: ActiveProblem, run_id: u64 },
+    RunCode {
+        problem: ActiveProblem,
+        run_id: u64,
+        cancel: Arc<AtomicBool>,
+    },
 }
 
 #[derive(Debug, VariantName, Clone)]
@@ -184,11 +235,18 @@ pub enum RunAction {
 pub enum HelperCommand {
     New(ActiveProblem),
     /// A command triggered externally (Zed task / HTTP), optionally targeting a file.
-    Command { file: Option<PathBuf>, action: RunAction },
+    /// The reply is sent once the UI thread has handled it.
+    Command {
+        file: Option<PathBuf>,
+        action: RunAction,
+        reply: Sender<Result<String, String>>,
+    },
+    /// A live status line while a run compiles / executes.
+    RunPhase { run_id: u64, message: String },
     /// One test case finished — streamed as soon as it completes.
     CaseResult { run_id: u64, index: usize, verdict: Verdict },
     /// Every test case of a run finished (or compilation failed).
-    RunFinished { run_id: u64 },
+    RunFinished { run_id: u64, elapsed_ms: u128 },
     /// A live status line for one in-flight submission, tagged with its id.
     SubmitStatus { id: u64, message: String },
     /// A submission reached its final verdict (or failed) — tagged with its id.
@@ -214,3 +272,87 @@ pub enum PassingCommand {
  * routes each envelope to the owning sender, so no worker needs a handle
  * to any other worker.
  */
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_language_names_still_load_as_cpp() {
+        for name in ["Cpp", "Cpp17", "Cpp20", "Cpp23"] {
+            let json = format!(r#"{{"language":"{name}"}}"#);
+            let config: UserConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(config.language, Language::Cpp);
+        }
+    }
+
+    #[test]
+    fn legacy_fallback_flags_become_the_current_language_flags() {
+        let json = r#"{"language":"Python","fallback_flags":["-u"]}"#;
+        let mut config: UserConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.active_flags(), ["-u"]);
+
+        config.normalize();
+        assert_eq!(config.extra_flags, ["-u"]);
+        assert_eq!(config.flags_by_language[&Language::Python], ["-u"]);
+        assert_eq!(config.active_flags(), ["-u"]);
+    }
+
+    #[test]
+    fn normalize_prefers_the_selected_language_flags() {
+        let mut config = UserConfig {
+            language: Language::Python,
+            extra_flags: vec!["-u".into()],
+            flags_by_language: HashMap::from([
+                (Language::Cpp, vec!["-O2".into()]),
+                (Language::Python, vec!["-B".into()]),
+            ]),
+        };
+
+        config.normalize();
+        assert_eq!(config.extra_flags, ["-B"]);
+        assert_eq!(config.active_flags(), ["-B"]);
+    }
+
+    #[test]
+    fn cpp_compiles_without_implicit_flags() {
+        let src = Path::new("A.cpp");
+        let bin = Path::new("A");
+
+        let (program, args) = Language::Cpp.compile_cmd(src, bin, &[]).unwrap();
+        assert_eq!(program, "g++");
+        assert_eq!(args, ["A.cpp", "-o", "A"]);
+
+        let flags = vec!["-std=c++20".to_string(), "-O2".to_string()];
+        let (_, args) = Language::Cpp.compile_cmd(src, bin, &flags).unwrap();
+        assert_eq!(args, ["-std=c++20", "-O2", "A.cpp", "-o", "A"]);
+
+        assert!(Language::Python.compile_cmd(src, bin, &[]).is_none());
+    }
+
+    #[test]
+    fn cf_id_follows_the_std_flag() {
+        assert_eq!(Language::Cpp.cf_id(&[]), "54");
+        assert_eq!(Language::Cpp.cf_id(&["-std=c++17".into()]), "54");
+        assert_eq!(Language::Cpp.cf_id(&["-std=c++20".into()]), "89");
+        assert_eq!(Language::Cpp.cf_id(&["-std=gnu++20".into()]), "89");
+        assert_eq!(Language::Cpp.cf_id(&["-std=c++23".into()]), "91");
+        assert_eq!(Language::Cpp.cf_id(&["-std=c++2b".into()]), "91");
+        assert_eq!(Language::Cpp.cf_id(&["-std=c++26".into()]), "91");
+        assert_eq!(Language::Cpp.cf_id(&["-std=c++1000".into()]), "54");
+        assert_eq!(Language::Cpp.cf_id(&["-O2".into(), "-std=c++20".into()]), "89");
+        assert_eq!(Language::Python.cf_id(&["-std=c++20".into()]), "31");
+    }
+
+    #[test]
+    fn std_parser_rejects_unknown_versions() {
+        assert_eq!(std_from_flag("-std=c++98"), Some(98));
+        assert_eq!(std_from_flag("-std=gnu++03"), Some(3));
+        assert_eq!(std_from_flag("--std=c++2c"), Some(26));
+        assert_eq!(std_from_flag("-STD=C++1z"), Some(17));
+        assert_eq!(std_from_flag("-std=c++1000"), None);
+        assert_eq!(std_from_flag("-std=c++19"), None);
+        assert_eq!(std_from_flag("-std="), None);
+        assert_eq!(std_from_flag("-O2"), None);
+    }
+}
