@@ -217,7 +217,7 @@ impl Helper {
     pub fn new(initial_dir: PathBuf, fs_ops: &FsOps) -> Self {
         let (config, _) = fs_ops.load_config();
         let mut dir_terminal = DirTerminal::new(initial_dir);
-        dir_terminal.set_message(
+        dir_terminal.set_hint(
             theme::CYAN,
             format!(
                 "Ready · listening on 127.0.0.1:{} — send a problem with Competitive Companion",
@@ -710,7 +710,7 @@ impl Helper {
         match self.begin_run() {
             Ok(command) => Some(command),
             Err(refusal) => {
-                self.dir_terminal.set_message(refusal.color(), refusal.message());
+                self.dir_terminal.set_error(refusal.color(), refusal.message());
                 None
             }
         }
@@ -749,7 +749,9 @@ impl Helper {
         self.run_id = self.run_id.wrapping_add(1);
         let cancel = Arc::new(AtomicBool::new(false));
         self.run_cancel = cancel.clone();
-        self.dir_terminal.set_message(
+        self.dir_terminal.clear_result();
+        self.dir_terminal.clear_error();
+        self.dir_terminal.set_live(
             theme::CYAN,
             if smoke {
                 "no stored cases — smoke-running with empty input & expected output".to_string()
@@ -779,14 +781,15 @@ impl Helper {
         } else if message.starts_with("sources unchanged") {
             self.last_compile = Some("compile skipped".to_string());
         }
-        self.dir_terminal.set_message(theme::CYAN, message);
+        self.dir_terminal.set_live(theme::CYAN, message);
     }
 
     fn cancel_run(&mut self) {
+        self.dir_terminal.clear_live();
         if self.running
             && let Some(started) = self.run_started.take()
         {
-            self.dir_terminal.set_message(
+            self.dir_terminal.set_result(
                 theme::YELLOW,
                 format!("run cancelled after {}ms", started.elapsed().as_millis()),
             );
@@ -800,7 +803,7 @@ impl Helper {
     pub fn cmd_add(&mut self) -> bool {
         if self.active_problem.is_none() {
             self.dir_terminal
-                .set_message(theme::RED, "no active problem — receive one to add custom cases");
+                .set_error(theme::RED, "no active problem — receive one to add custom cases");
             return false;
         }
         // Editing mutates cases the runner may still be writing to — retire the run.
@@ -809,7 +812,7 @@ impl Helper {
         self.tc_list.add_tc();
         self.expand_all_cases();
         self.sync_problem_tests();
-        self.dir_terminal.set_message(
+        self.dir_terminal.set_hint(
             theme::MUTED,
             format!(
                 "editing case {} · [Tab/Shift+Tab] switch field · [Esc] save",
@@ -821,7 +824,7 @@ impl Helper {
 
     pub fn cmd_edit(&mut self) -> bool {
         if self.active_problem.is_none() || self.tc_list.testcases.is_empty() {
-            self.dir_terminal.set_message(theme::RED, "nothing to edit");
+            self.dir_terminal.set_error(theme::RED, "nothing to edit");
             return false;
         }
         self.cancel_run();
@@ -829,7 +832,7 @@ impl Helper {
         self.tc_list.focus_first();
         self.expand_all_cases();
         self.dir_terminal
-            .set_message(theme::MUTED, "editing · [Tab/Shift+Tab] switch field · [Esc] save");
+            .set_hint(theme::MUTED, "editing · [Tab/Shift+Tab] switch field · [Esc] save");
         true
     }
 
@@ -837,7 +840,7 @@ impl Helper {
     /// another one, `Enter` asks for confirmation, and only that deletes.
     pub fn cmd_delete(&mut self) {
         if self.tc_list.testcases.is_empty() {
-            self.dir_terminal.set_message(theme::RED, "no test case to delete");
+            self.dir_terminal.set_error(theme::RED, "no test case to delete");
             return;
         }
         // A stale run must not write verdicts into a list that is about to shift.
@@ -846,7 +849,7 @@ impl Helper {
         self.tc_list.active_area = self.tc_list.active_area.min(self.tc_list.testcases.len() - 1);
         self.tc_list.update_scroll();
         self.input_mode = InputMode::DeleteSelect;
-        self.dir_terminal.set_message(
+        self.dir_terminal.set_hint(
             theme::RED,
             "delete mode · [Tab/Shift+Tab] select case · [Enter] confirm · [Esc] cancel",
         );
@@ -876,7 +879,7 @@ impl Helper {
         self.tc_list.update_scroll();
         self.input_mode = InputMode::Normal;
         if self.sync_problem_tests() {
-            self.dir_terminal.set_message(
+            self.dir_terminal.set_result(
                 theme::TEXT,
                 format!("deleted case {} · {} left", index + 1, self.tc_list.testcases.len()),
             );
@@ -894,7 +897,7 @@ impl Helper {
 
     pub fn cmd_submit(&mut self) -> Option<PassingCommand> {
         let Some(problem) = &self.active_problem else {
-            self.dir_terminal.set_message(theme::RED, "no active problem to submit");
+            self.dir_terminal.set_error(theme::RED, "no active problem to submit");
             return None;
         };
 
@@ -915,13 +918,13 @@ impl Helper {
                     time_limit: problem.effective_time_limit(),
                 });
                 self.input_mode = InputMode::ConfirmSubmit;
-                self.dir_terminal.set_message(
+                self.dir_terminal.set_hint(
                     theme::PURPLE,
                     "confirm submission · [Enter] submit · [Backspace] cancel",
                 );
             }
             Err(e) => {
-                self.dir_terminal.set_message(theme::RED, format!("cannot submit: {e}"));
+                self.dir_terminal.set_error(theme::RED, format!("cannot submit: {e}"));
             }
         }
         None
@@ -948,7 +951,7 @@ impl Helper {
                     )
                 }
                 Err(refusal) => {
-                    self.dir_terminal.set_message(refusal.color(), refusal.message());
+                    self.dir_terminal.set_error(refusal.color(), refusal.message());
                     (None, Err(refusal.message().to_string()))
                 }
             },
@@ -990,7 +993,7 @@ impl Helper {
             .claim_problem_stem(&problem.name, &problem.url, &code_dir);
 
         if let Err(e) = self.fs_ops.save_tc_file(&problem) {
-            self.dir_terminal.set_message(theme::RED, format!("failed to save test cases: {e}"));
+            self.dir_terminal.set_error(theme::RED, format!("failed to save test cases: {e}"));
         }
 
         let code_path = self.fs_ops.write_code_file(&problem, &code_dir);
@@ -1007,14 +1010,14 @@ impl Helper {
 
         self.attach_problem(problem);
         self.input_mode = InputMode::Normal;
-        self.dir_terminal.set_message(theme::TEXT, summary);
+        self.dir_terminal.set_result(theme::TEXT, summary);
         Some(code_path)
     }
 
     fn set_active_from_file(&mut self, file: &Path) -> Result<(), String> {
         if !file.exists() {
             let message = format!("file not found: {}", file.display());
-            self.dir_terminal.set_message(theme::RED, message.clone());
+            self.dir_terminal.set_error(theme::RED, message.clone());
             return Err(message);
         }
 
@@ -1099,17 +1102,20 @@ impl Helper {
             .is_some_and(|dialog| dialog.pane == PaneKind::Got && dialog.case_index == index)
         {
             self.pane_dialog = None;
+            self.dir_terminal.clear_hint();
         }
 
-        let label = match verdict {
-            CaseVerdict::AC { ms } => format!("✔ case {}/{} · AC · {}ms", index + 1, total, ms),
-            CaseVerdict::WA { ms } => format!("✘ case {}/{} · WA · {}ms", index + 1, total, ms),
-            CaseVerdict::Tle => format!("⏱ case {}/{} · TLE", index + 1, total),
-            CaseVerdict::RE => format!("✘ case {}/{} · RE", index + 1, total),
-            CaseVerdict::CE => format!("✘ case {}/{} · compilation failed", index + 1, total),
-            CaseVerdict::Pending => String::new(),
-        };
-        self.dir_terminal.set_message(verdict.color(), label);
+        if verdict.is_failed() {
+            let label = match verdict {
+                CaseVerdict::AC { ms } => format!("✔ case {}/{} · AC · {}ms", index + 1, total, ms),
+                CaseVerdict::WA { ms } => format!("✘ case {}/{} · WA · {}ms", index + 1, total, ms),
+                CaseVerdict::Tle => format!("⏱ case {}/{} · TLE", index + 1, total),
+                CaseVerdict::RE => format!("✘ case {}/{} · RE", index + 1, total),
+                CaseVerdict::CE => format!("✘ case {}/{} · compilation failed", index + 1, total),
+                CaseVerdict::Pending => String::new(),
+            };
+            self.dir_terminal.set_result(verdict.color(), label);
+        }
     }
 
     /// All cases of a run are in: summarize and focus the first failure.
@@ -1119,11 +1125,12 @@ impl Helper {
         }
         self.running = false;
         self.run_started = None;
+        self.dir_terminal.clear_live();
         let wall = elapsed_ms;
 
         let total = self.tc_list.testcases.len();
         if total == 0 {
-            self.dir_terminal.set_message(theme::YELLOW, "no test cases to run");
+            self.dir_terminal.set_result(theme::YELLOW, "no test cases to run");
             return;
         }
 
@@ -1160,7 +1167,7 @@ impl Helper {
         };
 
         self.dir_terminal
-            .set_message(if failed == 0 { theme::GREEN } else { theme::RED }, message);
+            .set_result(if failed == 0 { theme::GREEN } else { theme::RED }, message);
 
         if failed > 0
             && let Some(idx) = self.tc_list.testcases.iter().position(|tc| tc.verdict.is_failed())
@@ -1190,7 +1197,7 @@ impl Helper {
     }
 
     pub fn set_error(&mut self, message: String) {
-        self.dir_terminal.set_message(theme::RED, message);
+        self.dir_terminal.set_error(theme::RED, message);
     }
 
     // ------------------------------------------------------------------
@@ -1209,8 +1216,9 @@ impl Helper {
                     self.tc_list.remove_last();
                 }
 
+        self.dir_terminal.clear_hint();
         if self.sync_problem_tests() {
-            self.dir_terminal.set_message(theme::TEXT, "test cases saved");
+            self.dir_terminal.set_result(theme::TEXT, "test cases saved");
         }
     }
 
@@ -1227,7 +1235,7 @@ impl Helper {
             .collect();
         let snapshot = problem.clone();
         if let Err(e) = self.fs_ops.save_tc_file(&snapshot) {
-            self.dir_terminal.set_message(theme::RED, format!("failed to save: {e}"));
+            self.dir_terminal.set_error(theme::RED, format!("failed to save: {e}"));
             return false;
         }
         true
@@ -1291,7 +1299,7 @@ impl Helper {
         });
         self.last_pane_click = None;
         self.dir_terminal
-            .set_message(theme::MUTED, "pane dialog · Esc closes · ↑/↓ scroll · ←/→ pan");
+            .set_hint(theme::MUTED, "pane dialog · Esc closes · ↑/↓ scroll · ←/→ pan");
     }
 
     fn handle_pane_dialog_event(&mut self, event: Event) {
@@ -1299,6 +1307,7 @@ impl Helper {
             Event::Key(key) => match key.code {
                 KeyCode::Esc => {
                     self.pane_dialog = None;
+                    self.dir_terminal.clear_hint();
                 }
                 KeyCode::Up => self.scroll_pane_dialog(-1),
                 KeyCode::Down => self.scroll_pane_dialog(1),
@@ -1642,7 +1651,7 @@ impl Helper {
                     }
                     KeyCode::Esc => {
                         self.input_mode = InputMode::Normal;
-                        self.dir_terminal.set_message(theme::MUTED, "delete cancelled");
+                        self.dir_terminal.set_hint(theme::MUTED, "delete cancelled");
                     }
                     _ => {}
                 },
@@ -1650,7 +1659,7 @@ impl Helper {
                     KeyCode::Enter => self.delete_selected_case(),
                     KeyCode::Backspace | KeyCode::Esc => {
                         self.input_mode = InputMode::DeleteSelect;
-                        self.dir_terminal.set_message(
+                        self.dir_terminal.set_hint(
                             theme::RED,
                             "delete mode · [Tab/Shift+Tab] select case · [Enter] confirm · [Esc] cancel",
                         );
@@ -1667,14 +1676,14 @@ impl Helper {
                         let config = self.config_menu.to_config();
                         let saved = self.fs_ops.save_config(&config);
                         self.input_mode = InputMode::Normal;
-                        self.dir_terminal.set_message(
-                            if saved { theme::GREEN } else { theme::RED },
-                            if saved {
-                                format!("config saved · language {}", config.language.label())
-                            } else {
-                                "failed to save config".to_string()
-                            },
-                        );
+                        if saved {
+                            self.dir_terminal.set_result(
+                                theme::GREEN,
+                                format!("config saved · language {}", config.language.label()),
+                            );
+                        } else {
+                            self.dir_terminal.set_error(theme::RED, "failed to save config");
+                        }
                     }
                 }
                 InputMode::ConfirmSubmit => match key.code {
@@ -1699,6 +1708,7 @@ impl Helper {
                                 done: false,
                             });
                             self.submission_scroll = 0;
+                            self.dir_terminal.clear_hint();
                             if self.submissions.len() > MAX_SUBMISSIONS {
                                 self.submissions.remove(0);
                             }
@@ -1712,7 +1722,7 @@ impl Helper {
                         self.pending_submit = None;
                         self.input_mode = InputMode::Normal;
                         self.dir_terminal
-                            .set_message(theme::MUTED, "submission cancelled");
+                            .set_hint(theme::MUTED, "submission cancelled");
                     }
                     _ => {}
                 },
@@ -2287,8 +2297,8 @@ mod tests {
         let buffer = terminal.backend().buffer();
         assert_eq!(
             buffer[(0, 0)].fg,
-            theme::ACCENT,
-            "the master border is accent blue"
+            theme::MUTED,
+            "the master border stays muted"
         );
         assert_eq!(
             buffer[(2, 1)].fg,
@@ -2445,7 +2455,7 @@ mod tests {
         terminal.draw(|f| helper.draw(f)).unwrap();
         let buffer = terminal.backend().buffer();
 
-        assert_eq!(buffer[(0, 0)].fg, theme::ACCENT);
+        assert_eq!(buffer[(0, 0)].fg, theme::MUTED);
         assert_eq!(
             buffer[(3, 2)].bg,
             Color::Reset,
@@ -2479,7 +2489,7 @@ mod tests {
     }
 
     #[test]
-    fn test_case_list_has_no_outer_padding() {
+    fn test_case_list_reserves_a_scroll_viewport() {
         let root = temp_root("list_edge");
         let fs_ops = FsOps::with_root(root.clone());
         let work = root.join("problems");
@@ -2492,8 +2502,8 @@ mod tests {
 
         assert_eq!(helper.tc_list.testcases[0].area.rect.x, 2);
         assert_eq!(
-            helper.tc_list.testcases[0].area.rect.y, 4,
-            "the first case starts directly under the directory bar, inside the master border"
+            helper.tc_list.testcases[0].area.rect.y, 5,
+            "the list leaves a blank row under the directory bar"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -2576,6 +2586,49 @@ mod tests {
         helper.handle_event(key(KeyCode::Char('s')));
         helper.handle_event(key(KeyCode::Enter));
         assert_eq!(helper.submission_scroll, 0, "new submission snaps back to newest");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn successful_cases_do_not_churn_the_console() {
+        let root = temp_root("console_lanes");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        helper.new_problem(sample_problem());
+        helper.running = true;
+        helper.dir_terminal.clear_result();
+        helper.run_phase(helper.run_id, "running case 1/2…".to_string());
+        helper.apply_case_result(
+            helper.run_id,
+            0,
+            Verdict::Success {
+                output: ok_output("3\n"),
+                time: 1,
+            },
+        );
+
+        let message = &helper.dir_terminal.output.as_ref().unwrap().text;
+        assert!(message.contains("running case 1/2"), "live status stays visible: {message}");
+        assert!(!message.contains("AC"), "successful cases must not spam the console: {message}");
+
+        helper.apply_case_result(
+            helper.run_id,
+            1,
+            Verdict::Success {
+                output: ok_output("0\n"),
+                time: 2,
+            },
+        );
+        let message = &helper.dir_terminal.output.as_ref().unwrap().text;
+        assert!(message.contains("WA"), "failures still surface: {message}");
+
+        helper.run_finished(helper.run_id, 10);
+        let message = &helper.dir_terminal.output.as_ref().unwrap().text;
+        assert!(message.contains("1/2 failed"), "the final summary replaces the failure: {message}");
 
         let _ = std::fs::remove_dir_all(&root);
     }

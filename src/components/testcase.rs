@@ -609,7 +609,7 @@ impl TestCase {
             buf,
             &mut self.inp_content,
             &self.input_box,
-            " [Input] ",
+            "",
             input_active,
             is_editing,
             input_border,
@@ -747,10 +747,7 @@ impl TestCase {
         let pane_block = block(Some(title))
             .border_style(border_color)
             .title_style(Style::new().fg(title_color).bold())
-            .title_alignment(
-                if title == " [Input] " { Center }
-                else { Right }
-            );
+            .title_alignment(Right);
 
         // Only the box being edited is rendered as a TextArea — ratatui-textarea
         // positions the terminal cursor on render, so rendering another TextArea
@@ -995,26 +992,10 @@ fn offset_rect(rect: Rect, dx: i32, dy: i32) -> Rect {
     Rect { x: x as u16, y: y as u16, ..rect }
 }
 
-/// Appends a styled run: real newlines start new lines in the got pane.
-fn push_run(lines: &mut Vec<Line<'static>>, spans: &mut Vec<Span<'static>>, text: &str, style: Style) {
-    let mut parts = text.split('\n');
-    if let Some(first) = parts.next()
-        && !first.is_empty()
-    {
-        spans.push(Span::styled(first.to_string(), style));
-    }
-    for part in parts {
-        lines.push(Line::from(std::mem::take(spans)));
-        if !part.is_empty() {
-            spans.push(Span::styled(part.to_string(), style));
-        }
-    }
-}
-
-/// The Got pane on WA: the program's output, exactly as printed. A character
-/// is painted red when it sits at a position where the expected output has a
-/// different character (or has nothing at all); matching characters stay
-/// plain, and characters the output is missing are never invented.
+/// The Got pane on WA: the program's output, exactly as printed. Lines are
+/// aligned first; within an aligned line, a character is painted red when it
+/// differs from the expected output at the same position. Missing characters
+/// are never invented.
 pub(crate) fn highlight_got(expected: &str, got: &str) -> Vec<Line<'static>> {
     highlight_got_inner(expected, got, true)
 }
@@ -1026,31 +1007,100 @@ fn highlight_got_full(expected: &str, got: &str) -> Vec<Line<'static>> {
 
 fn highlight_got_inner(expected: &str, got: &str, capped: bool) -> Vec<Line<'static>> {
     let got = got.split(STDERR_MARKER).next().unwrap_or(got);
-    let expected: Vec<char> = if capped {
-        Capped::new(expected).text.chars().collect()
+    let expected = if capped {
+        Capped::new(expected).text
     } else {
-        expected.chars().collect()
+        expected.to_string()
     };
     let got = if capped { Capped::new(got).text } else { got.to_string() };
 
+    let expected_lines: Vec<&str> = expected.lines().collect();
+    let got_lines: Vec<&str> = got.lines().collect();
+    let aligned = align_lines(&expected_lines, &got_lines);
+
+    let mut lines = Vec::with_capacity(got_lines.len().max(1));
+    let mut next_expected = 0;
+    for (index, got_line) in got_lines.iter().enumerate() {
+        let expected_line = match aligned[index] {
+            Some(expected_index) => {
+                next_expected = expected_index + 1;
+                Some(expected_lines[expected_index])
+            }
+            None => expected_lines.get(next_expected).copied(),
+        };
+        lines.push(match expected_line {
+            Some(expected_line) => line_from_runs(line_runs(expected_line, got_line)),
+            None => {
+                let text = got_line.trim_end();
+                if text.is_empty() {
+                    Line::default()
+                } else {
+                    line_from_runs(vec![(true, text.to_string())])
+                }
+            }
+        });
+    }
+    if lines.is_empty() {
+        lines.push(Line::default());
+    }
+    lines
+}
+
+fn align_lines(expected: &[&str], got: &[&str]) -> Vec<Option<usize>> {
+    let n = expected.len();
+    let m = got.len();
+    if n.saturating_mul(m) > 250_000 {
+        return (0..m).map(|j| (j < n).then_some(j)).collect();
+    }
+
+    let mut dp = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i][j] = if expected[i].trim_end() == got[j].trim_end() {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+
+    let mut aligned = vec![None; m];
+    let (mut i, mut j) = (0, 0);
+    while i < n && j < m {
+        if expected[i].trim_end() == got[j].trim_end() {
+            aligned[j] = Some(i);
+            i += 1;
+            j += 1;
+        } else if dp[i + 1][j] >= dp[i][j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    aligned
+}
+
+fn line_runs(expected: &str, got: &str) -> Vec<(bool, String)> {
+    let expected: Vec<char> = expected.trim_end().chars().collect();
     let mut runs: Vec<(bool, String)> = Vec::new();
-    for (index, ch) in got.chars().enumerate() {
+    for (index, ch) in got.trim_end().chars().enumerate() {
         let red = expected.get(index) != Some(&ch);
         match runs.last_mut() {
             Some((last_red, text)) if *last_red == red => text.push(ch),
             _ => runs.push((red, String::from(ch))),
         }
     }
+    runs
+}
 
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    for (red, text) in runs {
-        push_run(&mut lines, &mut spans, &text, if red { extra_style() } else { Style::new() });
-    }
-    if !spans.is_empty() || lines.is_empty() {
-        lines.push(Line::from(spans));
-    }
-    lines
+fn line_from_runs(runs: Vec<(bool, String)>) -> Line<'static> {
+    let spans: Vec<Span<'static>> = runs
+        .into_iter()
+        .map(|(red, text)| {
+            Span::styled(text, if red { extra_style() } else { Style::new() })
+        })
+        .collect();
+    Line::from(spans)
 }
 
 #[cfg(test)]
@@ -1242,19 +1292,27 @@ mod tests {
     }
 
     #[test]
-    fn diff_is_positional_across_lines() {
+    fn diff_aligns_lines_before_coloring_characters() {
         let got = highlight_got("a\nb\nc", "a\nx\nb\nc");
         assert_eq!(got.len(), 4);
         assert!(red_spans(&got[0]).is_empty());
         assert_eq!(red_spans(&got[1]), vec!["x"]);
-        assert_eq!(red_spans(&got[2]), vec!["b"]);
-        assert_eq!(red_spans(&got[3]), vec!["c"]);
+        assert!(red_spans(&got[2]).is_empty());
+        assert!(red_spans(&got[3]).is_empty());
 
-        // A line the program never printed shifts the rest — marked, never invented.
         let got = highlight_got("a\nb\nc", "a\nc");
         assert_eq!(got.len(), 2);
         assert!(red_spans(&got[0]).is_empty());
-        assert_eq!(red_spans(&got[1]), vec!["c"]);
+        assert!(red_spans(&got[1]).is_empty());
+    }
+
+    #[test]
+    fn diff_does_not_shift_identical_lines() {
+        let got = highlight_got("abc\n144\ntail", "abcdef\n144\ntail");
+        assert_eq!(got.len(), 3);
+        assert_eq!(red_spans(&got[0]), vec!["def"]);
+        assert!(red_spans(&got[1]).is_empty(), "the identical 144 line stays plain");
+        assert!(red_spans(&got[2]).is_empty());
     }
 
     #[test]

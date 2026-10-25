@@ -5,14 +5,93 @@ use ratatui::{
     crossterm::event::{KeyCode, KeyEvent},
     layout::{HorizontalAlignment::Right, Rect},
     style::{Color, Style},
+    text::{Line, Span},
     widgets::{Paragraph, Wrap},
 };
 use ratatui_textarea::TextArea;
 
 use crate::components::{Message, block, icons, theme};
 
-const MSG_MAX_HEIGHT: u16 = 10;
+const CONSOLE_HEIGHT: u16 = 4;
 const HISTORY_LIMIT: usize = 200;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MessageLane {
+    Hint,
+    Live,
+    Result,
+    Error,
+}
+
+#[derive(Default)]
+struct MessageLanes {
+    hint: Option<Message>,
+    live: Option<Message>,
+    result: Option<Message>,
+    error: Option<Message>,
+}
+
+impl MessageLanes {
+    fn set(&mut self, lane: MessageLane, message: Message) -> bool {
+        let slot = match lane {
+            MessageLane::Hint => &mut self.hint,
+            MessageLane::Live => &mut self.live,
+            MessageLane::Result => &mut self.result,
+            MessageLane::Error => &mut self.error,
+        };
+        if slot
+            .as_ref()
+            .is_some_and(|current| current.text == message.text && current.color == message.color)
+        {
+            return false;
+        }
+        *slot = Some(message);
+
+        match lane {
+            MessageLane::Result => {
+                self.hint = None;
+                self.error = None;
+            }
+            MessageLane::Error => self.hint = None,
+            MessageLane::Live => self.hint = None,
+            MessageLane::Hint => {}
+        }
+        true
+    }
+
+    fn clear(&mut self, lane: MessageLane) -> bool {
+        let slot = match lane {
+            MessageLane::Hint => &mut self.hint,
+            MessageLane::Live => &mut self.live,
+            MessageLane::Result => &mut self.result,
+            MessageLane::Error => &mut self.error,
+        };
+        slot.take().is_some()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.hint.is_none()
+            && self.live.is_none()
+            && self.result.is_none()
+            && self.error.is_none()
+    }
+
+    fn active(&self) -> Option<&Message> {
+        self.error
+            .as_ref()
+            .or(self.result.as_ref())
+            .or(self.live.as_ref())
+            .or(self.hint.as_ref())
+    }
+
+    fn top(&self) -> Option<&Message> {
+        self.live.as_ref().or(self.hint.as_ref())
+    }
+
+    fn bottom(&self) -> Option<&Message> {
+        self.error.as_ref().or(self.result.as_ref())
+    }
+}
 
 struct Completion {
     dir_part: String,
@@ -24,6 +103,7 @@ pub struct DirTerminal {
     pub cur_dir: PathBuf,
     pub input_area: TextArea<'static>,
     pub output: Option<Message>,
+    lanes: MessageLanes,
     history: Vec<String>,
     history_cursor: Option<usize>,
     completion: Option<Completion>,
@@ -35,6 +115,7 @@ impl DirTerminal {
             cur_dir: initial_dir,
             input_area: TextArea::default(),
             output: None,
+            lanes: MessageLanes::default(),
             history: Vec::new(),
             history_cursor: None,
             completion: None,
@@ -42,7 +123,60 @@ impl DirTerminal {
     }
 
     pub fn set_message(&mut self, color: Color, text: impl Into<String>) {
-        self.output = Some(Message::new(color, text));
+        let lane = if color == theme::MUTED {
+            MessageLane::Hint
+        } else if color == theme::RED {
+            MessageLane::Error
+        } else {
+            MessageLane::Result
+        };
+        self.set_lane(lane, color, text);
+    }
+
+    pub fn set_live(&mut self, color: Color, text: impl Into<String>) {
+        self.set_lane(MessageLane::Live, color, text);
+    }
+
+    pub fn set_result(&mut self, color: Color, text: impl Into<String>) {
+        self.set_lane(MessageLane::Result, color, text);
+    }
+
+    pub fn set_hint(&mut self, color: Color, text: impl Into<String>) {
+        self.set_lane(MessageLane::Hint, color, text);
+    }
+
+    pub fn set_error(&mut self, color: Color, text: impl Into<String>) {
+        self.set_lane(MessageLane::Error, color, text);
+    }
+
+    pub fn clear_hint(&mut self) {
+        if self.lanes.clear(MessageLane::Hint) {
+            self.output = self.lanes.active().cloned();
+        }
+    }
+
+    pub fn clear_live(&mut self) {
+        if self.lanes.clear(MessageLane::Live) {
+            self.output = self.lanes.active().cloned();
+        }
+    }
+
+    pub fn clear_result(&mut self) {
+        if self.lanes.clear(MessageLane::Result) {
+            self.output = self.lanes.active().cloned();
+        }
+    }
+
+    pub fn clear_error(&mut self) {
+        if self.lanes.clear(MessageLane::Error) {
+            self.output = self.lanes.active().cloned();
+        }
+    }
+
+    fn set_lane(&mut self, lane: MessageLane, color: Color, text: impl Into<String>) {
+        if self.lanes.set(lane, Message::new(color, text)) {
+            self.output = self.lanes.active().cloned();
+        }
     }
 
     /// Height of the working-directory / command bar.
@@ -50,17 +184,10 @@ impl DirTerminal {
         3
     }
 
-    /// Height of the console panel rendered at the bottom of the screen.
-    pub fn console_height(&self, width: u16) -> u16 {
-        let Some(msg) = &self.output else { return 0 };
-
-        let inner_width = width.saturating_sub(4).max(1) as usize;
-        let mut rows: usize = 0;
-        for line in msg.text.lines() {
-            rows += line.chars().count().max(1).div_ceil(inner_width);
-        }
-        rows = rows.clamp(1, MSG_MAX_HEIGHT as usize);
-        rows as u16 + 2
+    /// The console reserves a fixed two-line body whenever it has anything to
+    /// show, so incoming messages never resize the rest of the layout.
+    pub fn console_height(&self, _width: u16) -> u16 {
+        if self.lanes.is_empty() { 0 } else { CONSOLE_HEIGHT }
     }
 
     pub fn draw_input(&mut self, frame: &mut Frame, area: Rect, is_active: bool) {
@@ -84,13 +211,18 @@ impl DirTerminal {
     }
 
     pub fn draw_console(&self, frame: &mut Frame, area: Rect) {
-        if area.height < 2 {
+        if area.height < 2 || self.lanes.is_empty() {
             return;
         }
-        let Some(msg) = &self.output else { return };
 
-        let msg_panel = Paragraph::new(msg.text.clone())
-            .style(msg.color)
+        let line = |message: Option<&Message>| match message {
+            Some(message) => Line::from(Span::styled(
+                message.text.lines().collect::<Vec<_>>().join(" "),
+                Style::new().fg(message.color),
+            )),
+            None => Line::from(""),
+        };
+        let msg_panel = Paragraph::new(vec![line(self.lanes.top()), line(self.lanes.bottom())])
             .block(
                 block(Some(" [Console] "))
                     .border_style(theme::BORDER)
@@ -112,7 +244,7 @@ impl DirTerminal {
             KeyCode::Up => self.history_up(),
             KeyCode::Down => self.history_down(),
             KeyCode::Esc => {
-                self.output = None;
+                self.clear_hint();
                 return true;
             }
             _ => {
@@ -146,7 +278,8 @@ impl DirTerminal {
             match new_path.canonicalize() {
                 Ok(canonical) if canonical.is_dir() => {
                     self.cur_dir = canonical;
-                    self.output = None;
+                    self.clear_hint();
+                    self.clear_error();
                 }
                 Ok(_) => self.set_message(theme::RED, format!("cd: not a directory: {target}")),
                 Err(_) => self.set_message(theme::RED, format!("cd: no such directory: {target}")),
@@ -233,7 +366,7 @@ impl DirTerminal {
 
         if matches.len() == 1 {
             self.input_area.insert_str("/");
-            self.output = None;
+            self.clear_hint();
         } else {
             self.show_matches(&matches, dir_part);
             self.completion = Some(Completion { dir_part: dir_part.to_string(), matches, next: 0 });
@@ -303,7 +436,11 @@ fn common_extension(matches: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
+    use ratatui::{
+        Terminal,
+        backend::TestBackend,
+        crossterm::event::{KeyEvent, KeyModifiers},
+    };
 
     fn tab() -> KeyEvent {
         KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)
@@ -322,6 +459,66 @@ mod tests {
 
     fn typed(terminal: &DirTerminal) -> String {
         terminal.input_area.lines().join("")
+    }
+
+    #[test]
+    fn message_lanes_keep_errors_visible_and_results_authoritative() {
+        let mut dir = DirTerminal::new(PathBuf::from("/tmp"));
+
+        dir.set_live(theme::CYAN, "running case 1/2");
+        dir.set_error(theme::RED, "network failed");
+        assert_eq!(dir.output.as_ref().unwrap().text, "network failed");
+        assert_eq!(dir.lanes.top().unwrap().text, "running case 1/2");
+        assert_eq!(dir.lanes.bottom().unwrap().text, "network failed");
+
+        dir.set_result(theme::GREEN, "all passed");
+        assert_eq!(dir.lanes.top().unwrap().text, "running case 1/2");
+        assert!(dir.lanes.error.is_none(), "a final result supersedes an error");
+        assert_eq!(dir.output.as_ref().unwrap().text, "all passed");
+        dir.clear_live();
+        assert!(dir.lanes.live.is_none(), "the run lifecycle ends the live phase");
+
+        dir.set_error(theme::RED, "submit failed");
+        dir.set_live(theme::CYAN, "running case 2/2");
+        assert_eq!(
+            dir.output.as_ref().unwrap().text,
+            "submit failed",
+            "a live phase must not erase an error"
+        );
+    }
+
+    #[test]
+    fn console_renders_live_and_result_on_separate_lines() {
+        let mut dir = DirTerminal::new(PathBuf::from("/tmp"));
+        dir.set_live(theme::CYAN, "running case 2/3");
+        dir.set_result(theme::GREEN, "2/3 passed");
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 4)).unwrap();
+        terminal
+            .draw(|frame| dir.draw_console(frame, Rect::new(0, 0, 40, 4)))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = |y| {
+            (0..40)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        };
+        assert!(row(1).contains("running case 2/3"), "live status is the top line");
+        assert!(row(2).contains("2/3 passed"), "the sticky result is the bottom line");
+    }
+
+    #[test]
+    fn console_height_is_stable_for_short_and_wrapped_messages() {
+        let mut dir = DirTerminal::new(PathBuf::from("/tmp"));
+        assert_eq!(dir.console_height(120), 0, "empty consoles take no space");
+
+        dir.set_result(theme::TEXT, "short");
+        assert_eq!(dir.console_height(120), 4);
+        assert_eq!(dir.console_height(10), 4);
+
+        dir.set_result(theme::TEXT, "long ".repeat(500));
+        assert_eq!(dir.console_height(120), 4, "wrapping must not resize the layout");
+        assert_eq!(dir.console_height(10), 4);
     }
 
     #[test]

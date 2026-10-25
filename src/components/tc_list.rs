@@ -2,8 +2,10 @@ use ratatui::{
     Frame,
     buffer::Buffer,
     crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
-    layout::{Constraint::{Length, Percentage}, Layout, Position, Rect},
-    widgets::{Scrollbar, ScrollbarState},
+    layout::{Alignment, Constraint::{Length, Percentage}, Layout, Position, Rect},
+    style::Style,
+    text::{Line, Span},
+    widgets::{Paragraph, Scrollbar, ScrollbarState},
 };
 
 use crate::components::{
@@ -103,7 +105,23 @@ impl TestCaseList {
     }
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect, focus: CaseFocus) {
-        self.available_height = area.height as usize;
+        if area.height < 3 || area.width == 0 {
+            self.available_height = 0;
+            self.scrollbar_area = Rect::default();
+            self.scrollbar_drag = None;
+            for tc in self.testcases.iter_mut() {
+                tc.clear_hit_areas();
+            }
+            return;
+        }
+
+        let viewport = Rect {
+            x: area.x,
+            y: area.y + 1,
+            width: area.width,
+            height: area.height - 2,
+        };
+        self.available_height = viewport.height as usize;
         for tc in self.testcases.iter_mut() {
             tc.clear_height_caps();
         }
@@ -119,14 +137,18 @@ impl TestCaseList {
         let total = self.total_rows();
         let needs_scrollbar = total > self.available_height;
 
-        let (tc_list_area, scrollbar_area) = if needs_scrollbar {
-            let division = Layout::horizontal([Percentage(100), Length(2)]).split(area);
+        let (tc_list_area, scrollbar_render_area) = if viewport.width >= 3 {
+            let division = Layout::horizontal([Percentage(100), Length(2)]).split(viewport);
             (division[0], division[1])
         } else {
-            (area, Rect::default())
+            (viewport, Rect::default())
         };
 
-        self.scrollbar_area = scrollbar_area;
+        self.scrollbar_area = if needs_scrollbar {
+            scrollbar_render_area
+        } else {
+            Rect::default()
+        };
         if !needs_scrollbar {
             self.scrollbar_drag = None;
         }
@@ -197,9 +219,45 @@ impl TestCaseList {
             current_row = tc_bottom;
         }
 
-        let scroll_range = total.saturating_sub(self.available_height);
-        let mut scroll_state = ScrollbarState::new(scroll_range).position(self.scroll_row);
-        frame.render_stateful_widget(scroll_bar, scrollbar_area, &mut scroll_state);
+        if needs_scrollbar {
+            let scroll_range = total.saturating_sub(self.available_height);
+            let mut scroll_state = ScrollbarState::new(scroll_range).position(self.scroll_row);
+            frame.render_stateful_widget(scroll_bar, scrollbar_render_area, &mut scroll_state);
+        }
+
+        let more = |text: &str| {
+            let label = format!(" {text} ");
+            let total = tc_list_area.width.min(32);
+            let label_width = label.chars().count() as u16;
+            if total <= label_width + 2 {
+                return Line::from(Span::styled(label, Style::new().fg(theme::MUTED)));
+            }
+            let rule = total - label_width;
+            let left = rule / 2;
+            let right = rule - left;
+            Line::from(vec![
+                Span::styled("─".repeat(left as usize), Style::new().fg(theme::BORDER)),
+                Span::styled(label, Style::new().fg(theme::MUTED)),
+                Span::styled("─".repeat(right as usize), Style::new().fg(theme::BORDER)),
+            ])
+        };
+        if self.scroll_row > 0 {
+            frame.render_widget(
+                Paragraph::new(more("↑ more")).alignment(Alignment::Center),
+                Rect { x: tc_list_area.x, y: area.y, width: tc_list_area.width, height: 1 },
+            );
+        }
+        if self.scroll_row + self.available_height < total {
+            frame.render_widget(
+                Paragraph::new(more("↓ more")).alignment(Alignment::Center),
+                Rect {
+                    x: tc_list_area.x,
+                    y: area.y + area.height - 1,
+                    width: tc_list_area.width,
+                    height: 1,
+                },
+            );
+        }
     }
 
     pub fn handle_key(&mut self, event: Event) {
@@ -404,6 +462,53 @@ mod tests {
 
         list.handle_mouse(&mouse(MouseEventKind::Up(MouseButton::Left), area.x, area.y + 1));
         assert!(list.scrollbar_drag.is_none());
+    }
+
+    #[test]
+    fn list_width_does_not_change_when_the_scrollbar_appears() {
+        let mut list = TestCaseList::new();
+        list.testcases.push(TestCase::new("0", ""));
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal
+            .draw(|frame| list.draw(frame, frame.area(), CaseFocus::None))
+            .unwrap();
+        let width_without_scrollbar = list.testcases[0].area.rect.width;
+        assert_eq!(list.scrollbar_area, Rect::default());
+
+        for index in 1..20 {
+            list.testcases.push(TestCase::new(&format!("{index}"), ""));
+        }
+        terminal
+            .draw(|frame| list.draw(frame, frame.area(), CaseFocus::None))
+            .unwrap();
+
+        assert!(list.scrollbar_area.width > 0, "the list must now scroll");
+        assert_eq!(
+            list.testcases[0].area.rect.width, width_without_scrollbar,
+            "reserving the gutter must keep the list width stable"
+        );
+    }
+
+    #[test]
+    fn scrolled_list_marks_more_content_above_and_below() {
+        let mut list = TestCaseList::new();
+        for index in 0..20 {
+            list.testcases.push(TestCase::new(&format!("{index}"), ""));
+        }
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        list.scroll_row = 5;
+        terminal
+            .draw(|frame| list.draw(frame, frame.area(), CaseFocus::None))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let row = |y| (0..60).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+        assert!(row(0).contains("↑ more"), "top gutter row: {}", row(0));
+        assert!(row(0).contains("─"), "top gutter row: {}", row(0));
+        assert!(row(19).contains("↓ more"), "bottom gutter row: {}", row(19));
+        assert!(row(19).contains("─"), "bottom gutter row: {}", row(19));
     }
 
 }
