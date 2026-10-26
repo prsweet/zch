@@ -8,16 +8,9 @@ use std::{
 };
 
 use ratatui::{
-    Frame,
-    crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind},
-    layout::{
-        Alignment,
-        Constraint::{Length, Min, Percentage},
-        Layout, Position, Rect,
-    },
-    style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
-    widgets::{Block, Clear, Paragraph, ScrollbarOrientation, ScrollbarState},
+    Frame, crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind}, layout::{
+        Alignment, Constraint::{Length, Min, Percentage}, HorizontalAlignment::Right, Layout, Position, Rect,
+    }, style::{Color, Modifier, Style}, text::{Line, Span, Text}, widgets::{Block, Clear, Paragraph, ScrollbarOrientation, ScrollbarState},
 };
 
 use crate::{
@@ -292,7 +285,7 @@ impl Helper {
 
         let master_border = block(Some(" ZCH "))
             .border_style(theme::MUTED())
-            .title_style(Style::new().fg(theme::ACCENT()).bold());
+            .title_style(Style::new().fg(theme::ORANGE()).bold());
         let main_area = master_border.inner(area);
         frame.render_widget(master_border, area);
 
@@ -471,7 +464,8 @@ impl Helper {
             .collect();
 
         frame.render_widget(
-            Paragraph::new(lines).block(block(Some(" Submissions "))),
+            Paragraph::new(lines)
+                .block(block(Some(" [Submissions] ")).title_alignment(Right)),
             list_area,
         );
 
@@ -508,7 +502,7 @@ impl Helper {
                     self.tc_list.testcases.len()
                 ),
                 theme::GREEN(),
-                &["Tab", "⇧Tab", "Esc"],
+                &["Tab/⇧Tab", "Esc"],
             ),
             InputMode::DeleteSelect => (
                 format!(
@@ -517,7 +511,7 @@ impl Helper {
                     self.tc_list.testcases.len()
                 ),
                 theme::RED(),
-                &["Tab", "⇧Tab", "Enter", "Esc"],
+                &["Tab/⇧Tab", "Enter", "Esc"],
             ),
             InputMode::ConfirmDelete => (
                 "CONFIRM DELETE".to_string(),
@@ -566,15 +560,15 @@ impl Helper {
                 ("[q]", "quit"),
             ],
             InputMode::Editing if self.adding_case => &[
-                ("[Tab] [⇧Tab]", "switch input / expected"),
+                ("[Tab/⇧Tab]", "switch input / expected"),
                 ("[Esc]", "save & back"),
             ],
             InputMode::Editing => &[
-                ("[Tab] [⇧Tab]", "switch pane / case"),
+                ("[Tab/⇧Tab]", "switch pane / case"),
                 ("[Esc]", "save & back"),
             ],
             InputMode::DeleteSelect => &[
-                ("[Tab] [⇧Tab]", "select case"),
+                ("[Tab/⇧Tab]", "select case"),
                 ("[Enter]", "confirm delete"),
                 ("[Esc]", "cancel"),
             ],
@@ -1344,6 +1338,7 @@ impl Helper {
 
     pub fn submit_finished(&mut self, id: u64, result: String) {
         let color = match submitter::classify(&result) {
+            submitter::Outcome::PartiallyAccepted => theme::YELLOW(),
             submitter::Outcome::Accepted => theme::GREEN(),
             submitter::Outcome::Rejected | submitter::Outcome::Failed => theme::RED(),
         };

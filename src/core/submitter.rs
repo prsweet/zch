@@ -49,6 +49,7 @@ pub fn spawn_submitter(main_tx: Sender<PassingCommand>) -> Sender<SubmitterComma
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
+    PartiallyAccepted,
     Accepted,
     Rejected,
     Failed,
@@ -58,7 +59,9 @@ pub enum Outcome {
 /// submission bar and result classification.
 pub fn classify(result: &str) -> Outcome {
     let lower = result.to_lowercase();
-    if lower.contains("accepted") || lower.contains(": ac") {
+    if lower.contains("pretest") {
+        Outcome::PartiallyAccepted
+    } else if lower.contains("accepted") || lower.contains(": ac") {
         Outcome::Accepted
     } else if result.starts_with("RESULT:") || result.contains("REJECTED") {
         Outcome::Rejected
