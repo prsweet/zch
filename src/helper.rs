@@ -2830,7 +2830,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(screen.contains("switch input / expected"), "{screen}");
-        assert!(screen.contains("[Tab] [⇧Tab]"), "{screen}");
+        assert!(screen.contains("[Tab/⇧Tab]"), "{screen}");
         assert!(screen.contains("[F1]"), "the close hint names F1: {screen}");
         assert!(screen.contains("EDITING"), "the footer keeps the mode: {screen}");
 
@@ -2922,7 +2922,7 @@ mod tests {
             .collect::<String>();
         assert!(header.contains("ZCH"), "the brand chip is back: {header}");
         let brand_x = header.find('Z').unwrap() as u16;
-        assert_eq!(buffer[(brand_x, 0)].fg, theme::ACCENT());
+        assert_eq!(buffer[(brand_x, 0)].fg, theme::ORANGE());
 
         let row = (0..buffer.area.width)
             .map(|x| buffer[(x, 1)].symbol())
