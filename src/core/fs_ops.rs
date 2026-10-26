@@ -1,6 +1,13 @@
-use std::{fs, path::{Path, PathBuf}, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-use crate::{core::{ActiveProblem, Language, UserConfig}, error::AppError};
+use crate::{
+    core::{ActiveProblem, Language, UserConfig},
+    error::AppError,
+};
 
 const DEFAULT_CPP_BOILERPLATE: &str = r#"#include <bits/stdc++.h>
 using namespace std;
@@ -69,7 +76,11 @@ impl FsOps {
             .map(|c| if c == ' ' || c == '.' { '_' } else { c })
             .filter(|c| c.is_alphanumeric() || *c == '_')
             .collect();
-        if clean.is_empty() { "problem".to_string() } else { clean }
+        if clean.is_empty() {
+            "problem".to_string()
+        } else {
+            clean
+        }
     }
 
     /// The stem used for this problem's `.json`, binary, and source file.
@@ -178,9 +189,10 @@ impl FsOps {
 
         for path in candidates {
             if let Ok(content) = fs::read_to_string(&path)
-                && !content.trim().is_empty() {
-                    return content;
-                }
+                && !content.trim().is_empty()
+            {
+                return content;
+            }
         }
 
         match language {
@@ -205,18 +217,23 @@ impl FsOps {
 
         if file_path.exists() {
             if !problem.url.is_empty()
-                && let Ok(content) = fs::read_to_string(&file_path) {
-                    let has_url = content
-                        .lines()
-                        .take(3)
-                        .any(|l| l.starts_with("// URL:") || l.starts_with("# URL:"));
-                    if !has_url {
-                        let _ = fs::write(
-                            &file_path,
-                            format!("{}{}", Self::url_comment_line(language, &problem.url), content),
-                        );
-                    }
+                && let Ok(content) = fs::read_to_string(&file_path)
+            {
+                let has_url = content
+                    .lines()
+                    .take(3)
+                    .any(|l| l.starts_with("// URL:") || l.starts_with("# URL:"));
+                if !has_url {
+                    let _ = fs::write(
+                        &file_path,
+                        format!(
+                            "{}{}",
+                            Self::url_comment_line(language, &problem.url),
+                            content
+                        ),
+                    );
                 }
+            }
             return file_path;
         }
 
@@ -250,7 +267,9 @@ impl FsOps {
 
     /// Delete compiled binaries older than 24h.
     pub fn prune_binaries(&self) {
-        let Ok(entries) = fs::read_dir(&self.binary_dir) else { return };
+        let Ok(entries) = fs::read_dir(&self.binary_dir) else {
+            return;
+        };
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -273,10 +292,11 @@ impl FsOps {
     pub fn load_config(&self) -> (UserConfig, bool) {
         let file_path = self.root_dir.join("config.json");
         if let Ok(file) = fs::read_to_string(&file_path)
-            && let Ok(mut parsed) = serde_json::from_str::<UserConfig>(&file) {
-                parsed.normalize();
-                return (parsed, true);
-            }
+            && let Ok(mut parsed) = serde_json::from_str::<UserConfig>(&file)
+        {
+            parsed.normalize();
+            return (parsed, true);
+        }
         let mut config = UserConfig::default();
         config.normalize();
         (config, false)

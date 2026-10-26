@@ -1,6 +1,10 @@
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint::{Fill, Length}, Layout, Rect},
+    layout::{
+        Alignment,
+        Constraint::{Fill, Length},
+        Layout, Rect,
+    },
     style::{Color, Style},
     text::{Line, Span},
     widgets::Paragraph,
@@ -13,8 +17,8 @@ pub fn render(frame: &mut Frame, area: Rect, spinner: &str, tick: i64, port: u16
     let phase = tick.rem_euclid(120) as f32 / 120.0;
     let logo = logo_lines(phase);
 
-    let chunks = Layout::vertical([Fill(1), Length(logo.len() as u16), Length(7), Fill(1)])
-        .split(area);
+    let chunks =
+        Layout::vertical([Fill(1), Length(logo.len() as u16), Length(7), Fill(1)]).split(area);
     frame.render_widget(Paragraph::new(logo).alignment(Alignment::Center), chunks[1]);
 
     let version = concat!("v", env!("CARGO_PKG_VERSION"));
@@ -32,7 +36,10 @@ pub fn render(frame: &mut Frame, area: Rect, spinner: &str, tick: i64, port: u16
         Line::default(),
         Line::from(vec![
             Span::styled(format!("{spinner} "), Style::new().fg(theme::CYAN)),
-            Span::styled(format!("listening on 127.0.0.1:{port}"), Style::new().fg(theme::CYAN)),
+            Span::styled(
+                format!("listening on 127.0.0.1:{port}"),
+                Style::new().fg(theme::CYAN),
+            ),
         ]),
         Line::from(vec![
             Span::styled(version, Style::new().fg(theme::BORDER)),
@@ -43,7 +50,10 @@ pub fn render(frame: &mut Frame, area: Rect, spinner: &str, tick: i64, port: u16
         ]),
     ];
 
-    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), chunks[2]);
+    frame.render_widget(
+        Paragraph::new(lines).alignment(Alignment::Center),
+        chunks[2],
+    );
 }
 
 /// ANSI Shadow style "ZCH": fat 3D block letters.
@@ -88,12 +98,15 @@ fn gradient(t: f32) -> Color {
     let local = t - index as f32;
     let mix = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * local).round() as u8;
     let (low, high) = (STOPS[index], STOPS[index + 1]);
-    Color::Rgb(mix(low[0], high[0]), mix(low[1], high[1]), mix(low[2], high[2]))
+    Color::Rgb(
+        mix(low[0], high[0]),
+        mix(low[1], high[1]),
+        mix(low[2], high[2]),
+    )
 }
 
 fn cell_t(col: usize, row: usize, cols: usize, rows: usize, phase: f32) -> f32 {
-    let diagonal =
-        0.55 * row as f32 / (rows - 1) as f32 + 0.45 * col as f32 / (cols - 1) as f32;
+    let diagonal = 0.55 * row as f32 / (rows - 1) as f32 + 0.45 * col as f32 / (cols - 1) as f32;
     diagonal + 0.12 * (phase * std::f32::consts::TAU).sin()
 }
 
@@ -106,10 +119,12 @@ mod tests {
     fn splash_renders_on_narrow_and_wide_terminals() {
         for (width, height) in [(80, 24), (120, 40), (200, 50)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-            terminal.draw(|frame| {
-                let area = frame.area();
-                render(frame, area, "⠋", 0, 10043);
-            }).unwrap();
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    render(frame, area, "⠋", 0, 10043);
+                })
+                .unwrap();
             let buffer = terminal.backend().buffer();
             let mut text = String::new();
             for y in 0..buffer.area.height {

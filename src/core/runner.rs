@@ -50,7 +50,12 @@ pub fn spawn_runner(main_tx: Sender<PassingCommand>, fs_ops: FsOps) -> Sender<Ru
     let (tx, rx) = channel::<RunnerCommand>();
     thread::spawn(move || {
         let mut cache: HashMap<CacheKey, CacheEntry> = HashMap::new();
-        while let Ok(RunnerCommand::RunCode { problem, run_id, cancel }) = rx.recv() {
+        while let Ok(RunnerCommand::RunCode {
+            problem,
+            run_id,
+            cancel,
+        }) = rx.recv()
+        {
             run_streaming(&problem, run_id, &fs_ops, &main_tx, &mut cache, &cancel);
         }
     });
@@ -84,12 +89,19 @@ fn run_streaming(
     }
 
     let phase = |message: String| {
-        let _ = tx.send(PassingCommand::ToHelper(HelperCommand::RunPhase { run_id, message }));
+        let _ = tx.send(PassingCommand::ToHelper(HelperCommand::RunPhase {
+            run_id,
+            message,
+        }));
     };
 
     let compiles = config
         .language
-        .compile_cmd(&problem.code_file, &fs_ops.binary_dir.join(&problem.name), config.active_flags())
+        .compile_cmd(
+            &problem.code_file,
+            &fs_ops.binary_dir.join(&problem.name),
+            config.active_flags(),
+        )
         .is_some();
     if compiles {
         phase("compiling…".to_string());
@@ -101,7 +113,9 @@ fn run_streaming(
                 let sent = tx.send(PassingCommand::ToHelper(HelperCommand::CaseResult {
                     run_id,
                     index,
-                    verdict: Verdict::CompilationError { error: error.clone() },
+                    verdict: Verdict::CompilationError {
+                        error: error.clone(),
+                    },
                 }));
                 if sent.is_err() {
                     return;
@@ -174,12 +188,17 @@ fn compile(
         return Ok(Compile::Cancelled);
     }
     if !problem.code_file.exists() {
-        return Err(format!("source file not found: {}", problem.code_file.display()));
+        return Err(format!(
+            "source file not found: {}",
+            problem.code_file.display()
+        ));
     }
 
     let binary_path = fs_ops.binary_dir.join(&problem.name);
     let Some((program, args)) =
-        config.language.compile_cmd(&problem.code_file, &binary_path, config.active_flags())
+        config
+            .language
+            .compile_cmd(&problem.code_file, &binary_path, config.active_flags())
     else {
         return Ok(Compile::NotNeeded);
     };
@@ -330,9 +349,14 @@ fn run_single(
             Ok(Some(output)) => {
                 let time = start.elapsed().as_millis();
                 return Some(if output.status.success() {
-                    Verdict::Success { output: output.clone(), time }
+                    Verdict::Success {
+                        output: output.clone(),
+                        time,
+                    }
                 } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr).trim_end().to_string();
+                    let stderr = String::from_utf8_lossy(&output.stderr)
+                        .trim_end()
+                        .to_string();
                     let error = if stderr.is_empty() {
                         format!("exited with {}", output.status)
                     } else {
@@ -382,10 +406,17 @@ mod tests {
         while let Ok(message) = main_rx.recv_timeout(timeout) {
             if let PassingCommand::ToHelper(command) = message {
                 match command {
-                    HelperCommand::RunPhase { run_id: id, message } if id == run_id => {
+                    HelperCommand::RunPhase {
+                        run_id: id,
+                        message,
+                    } if id == run_id => {
                         phases.push(message);
                     }
-                    HelperCommand::CaseResult { run_id: id, verdict, .. } if id == run_id => {
+                    HelperCommand::CaseResult {
+                        run_id: id,
+                        verdict,
+                        ..
+                    } if id == run_id => {
                         verdicts.push(verdict);
                     }
                     HelperCommand::RunFinished { run_id: id, .. } if id == run_id => break,
@@ -412,7 +443,11 @@ mod tests {
             test_cases: Vec::new(),
             code_file: file.clone(),
         };
-        let cpp = UserConfig { language: Language::Cpp, extra_flags: vec!["-O2".into()], ..Default::default() };
+        let cpp = UserConfig {
+            language: Language::Cpp,
+            extra_flags: vec!["-O2".into()],
+            ..Default::default()
+        };
         let first = cache_key(&problem, &cpp, &fs_ops).unwrap();
         assert_eq!(first, cache_key(&problem, &cpp, &fs_ops).unwrap());
 
@@ -428,14 +463,23 @@ mod tests {
 
     #[test]
     fn second_run_reuses_the_compiled_binary() {
-        if std::process::Command::new("g++").arg("--version").output().is_err() {
+        if std::process::Command::new("g++")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
             return;
         }
 
-        let root = std::env::temp_dir().join(format!("zcph_runner_compile_cache_{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("zcph_runner_compile_cache_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let fs_ops = FsOps::with_root(root.clone());
-        assert!(fs_ops.save_config(&UserConfig { language: Language::Cpp, extra_flags: vec![], ..Default::default() }));
+        assert!(fs_ops.save_config(&UserConfig {
+            language: Language::Cpp,
+            extra_flags: vec![],
+            ..Default::default()
+        }));
 
         let code_file = root.join("Add.cpp");
         std::fs::write(
@@ -448,7 +492,10 @@ mod tests {
             name: "Add".into(),
             url: String::new(),
             time_limit: 3000,
-            test_cases: vec![ReceivingTestCase { input: "1 2".into(), expected_output: "3".into() }],
+            test_cases: vec![ReceivingTestCase {
+                input: "1 2".into(),
+                expected_output: "3".into(),
+            }],
             code_file,
         };
 
@@ -467,11 +514,17 @@ mod tests {
         };
 
         let (phases, verdicts) = collect(1);
-        assert!(phases.iter().any(|phase| phase.contains("compiled in")), "{phases:?}");
+        assert!(
+            phases.iter().any(|phase| phase.contains("compiled in")),
+            "{phases:?}"
+        );
         assert!(matches!(verdicts[0], Verdict::Success { .. }));
 
         let (phases, verdicts) = collect(2);
-        assert!(phases.iter().any(|phase| phase.contains("compile skipped")), "{phases:?}");
+        assert!(
+            phases.iter().any(|phase| phase.contains("compile skipped")),
+            "{phases:?}"
+        );
         assert!(matches!(verdicts[0], Verdict::Success { .. }));
 
         let _ = std::fs::remove_dir_all(&root);
@@ -482,7 +535,11 @@ mod tests {
         let root = std::env::temp_dir().join(format!("zcph_runner_stream_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let fs_ops = FsOps::with_root(root.clone());
-        assert!(fs_ops.save_config(&UserConfig { language: Language::Python, extra_flags: vec![], ..Default::default() }));
+        assert!(fs_ops.save_config(&UserConfig {
+            language: Language::Python,
+            extra_flags: vec![],
+            ..Default::default()
+        }));
 
         let code_file = root.join("Slow.py");
         std::fs::write(
@@ -496,8 +553,14 @@ mod tests {
             url: String::new(),
             time_limit: 3000,
             test_cases: vec![
-                ReceivingTestCase { input: "1".into(), expected_output: "1".into() },
-                ReceivingTestCase { input: "2".into(), expected_output: "2".into() },
+                ReceivingTestCase {
+                    input: "1".into(),
+                    expected_output: "1".into(),
+                },
+                ReceivingTestCase {
+                    input: "2".into(),
+                    expected_output: "2".into(),
+                },
             ],
             code_file,
         };
@@ -518,7 +581,11 @@ mod tests {
         while let Ok(message) = main_rx.recv_timeout(Duration::from_secs(5)) {
             if let PassingCommand::ToHelper(command) = message {
                 match command {
-                    HelperCommand::CaseResult { run_id: 7, index: 0, .. } => {
+                    HelperCommand::CaseResult {
+                        run_id: 7,
+                        index: 0,
+                        ..
+                    } => {
                         first_case_at = Some(start.elapsed());
                     }
                     HelperCommand::RunFinished { run_id: 7, .. } => {
@@ -532,16 +599,28 @@ mod tests {
 
         let first = first_case_at.expect("first case should stream");
         let finished = finished_at.expect("run should finish");
-        assert!(first < Duration::from_millis(500), "first result took {first:?}");
-        assert!(finished > Duration::from_millis(700), "run finished too early: {finished:?}");
+        assert!(
+            first < Duration::from_millis(500),
+            "first result took {first:?}"
+        );
+        assert!(
+            finished > Duration::from_millis(700),
+            "run finished too early: {finished:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn java_recompiles_after_source_changes() {
-        if std::process::Command::new("javac").arg("-version").output().is_err()
-            || std::process::Command::new("java").arg("-version").output().is_err()
+        if std::process::Command::new("javac")
+            .arg("-version")
+            .output()
+            .is_err()
+            || std::process::Command::new("java")
+                .arg("-version")
+                .output()
+                .is_err()
         {
             return;
         }
@@ -549,7 +628,11 @@ mod tests {
         let root = std::env::temp_dir().join(format!("zcph_runner_java_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let fs_ops = FsOps::with_root(root.clone());
-        assert!(fs_ops.save_config(&UserConfig { language: Language::Java, extra_flags: vec![], ..Default::default() }));
+        assert!(fs_ops.save_config(&UserConfig {
+            language: Language::Java,
+            extra_flags: vec![],
+            ..Default::default()
+        }));
 
         let code_file = root.join("JavaCache.java");
         let write = |body: &str| {
@@ -567,7 +650,10 @@ mod tests {
             name: "JavaCache".into(),
             url: String::new(),
             time_limit: 3000,
-            test_cases: vec![ReceivingTestCase { input: String::new(), expected_output: "1".into() }],
+            test_cases: vec![ReceivingTestCase {
+                input: String::new(),
+                expected_output: "1".into(),
+            }],
             code_file: code_file.clone(),
         };
 
@@ -585,19 +671,31 @@ mod tests {
         };
 
         let (phases, _) = run(1);
-        assert!(phases.iter().any(|phase| phase.contains("compiled in")), "{phases:?}");
+        assert!(
+            phases.iter().any(|phase| phase.contains("compiled in")),
+            "{phases:?}"
+        );
 
         let (phases, _) = run(2);
-        assert!(phases.iter().any(|phase| phase.contains("compile skipped")), "{phases:?}");
+        assert!(
+            phases.iter().any(|phase| phase.contains("compile skipped")),
+            "{phases:?}"
+        );
 
         write("System.out.println(222222);");
         let (phases, _) = run(3);
-        assert!(phases.iter().any(|phase| phase.contains("compiled in")), "{phases:?}");
+        assert!(
+            phases.iter().any(|phase| phase.contains("compiled in")),
+            "{phases:?}"
+        );
 
         // Restoring the old source must not reuse the class from run 3.
         write("System.out.println(1);");
         let (phases, verdicts) = run(4);
-        assert!(phases.iter().any(|phase| phase.contains("compiled in")), "{phases:?}");
+        assert!(
+            phases.iter().any(|phase| phase.contains("compiled in")),
+            "{phases:?}"
+        );
         match verdicts.first() {
             Some(Verdict::Success { output, .. }) => {
                 assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "1");
@@ -610,14 +708,22 @@ mod tests {
 
     #[test]
     fn cancellation_kills_a_hung_case() {
-        if std::process::Command::new("python3").arg("--version").output().is_err() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
             return;
         }
 
         let root = std::env::temp_dir().join(format!("zcph_runner_cancel_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let fs_ops = FsOps::with_root(root.clone());
-        assert!(fs_ops.save_config(&UserConfig { language: Language::Python, extra_flags: vec![], ..Default::default() }));
+        assert!(fs_ops.save_config(&UserConfig {
+            language: Language::Python,
+            extra_flags: vec![],
+            ..Default::default()
+        }));
 
         let code_file = root.join("Hang.py");
         std::fs::write(&code_file, "while True:\n    pass\n").unwrap();
@@ -625,7 +731,10 @@ mod tests {
             name: "Hang".into(),
             url: String::new(),
             time_limit: 10_000,
-            test_cases: vec![ReceivingTestCase { input: String::new(), expected_output: String::new() }],
+            test_cases: vec![ReceivingTestCase {
+                input: String::new(),
+                expected_output: String::new(),
+            }],
             code_file,
         };
 
@@ -646,7 +755,8 @@ mod tests {
 
         let mut finished = false;
         while let Ok(message) = main_rx.recv_timeout(Duration::from_secs(2)) {
-            if let PassingCommand::ToHelper(HelperCommand::RunFinished { run_id: 9, .. }) = message {
+            if let PassingCommand::ToHelper(HelperCommand::RunFinished { run_id: 9, .. }) = message
+            {
                 finished = true;
                 break;
             }

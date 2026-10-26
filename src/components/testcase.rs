@@ -6,7 +6,16 @@ use std::{
 };
 
 use ratatui::{
-    buffer::Buffer, crossterm::event::{MouseButton, MouseEvent, MouseEventKind}, layout::{Constraint::{Length, Percentage}, HorizontalAlignment::{Center, Left, Right}, Layout, Rect}, style::{Color, Modifier, Style}, text::{Line, Span, Text}, widgets::{BorderType, Borders, Padding, Paragraph, Widget},
+    buffer::Buffer,
+    crossterm::event::{MouseButton, MouseEvent, MouseEventKind},
+    layout::{
+        Constraint::{Length, Percentage},
+        HorizontalAlignment::{Left, Right},
+        Layout, Rect,
+    },
+    style::{Color, Modifier, Style},
+    text::{Line, Span, Text},
+    widgets::{BorderType, Borders, Padding, Paragraph, Widget},
 };
 use ratatui_textarea::TextArea;
 
@@ -73,7 +82,10 @@ impl CaseVerdict {
     }
 
     pub fn is_failed(&self) -> bool {
-        matches!(self, CaseVerdict::WA { .. } | CaseVerdict::Tle | CaseVerdict::RE | CaseVerdict::CE)
+        matches!(
+            self,
+            CaseVerdict::WA { .. } | CaseVerdict::Tle | CaseVerdict::RE | CaseVerdict::CE
+        )
     }
 }
 
@@ -110,7 +122,10 @@ impl GotFile {
         ));
         let file = File::create(&path)?;
         let mut writer = BufWriter::new(file);
-        if let Err(error) = writer.write_all(got.as_bytes()).and_then(|_| writer.flush()) {
+        if let Err(error) = writer
+            .write_all(got.as_bytes())
+            .and_then(|_| writer.flush())
+        {
             let _ = fs::remove_file(&path);
             return Err(error);
         }
@@ -131,10 +146,19 @@ impl GotFile {
             line + usize::from(!got.ends_with('\n'))
         };
         let stderr_line = got.find(STDERR_MARKER).map(|position| {
-            got[..position].bytes().filter(|&byte| byte == b'\n').count() + 1
+            got[..position]
+                .bytes()
+                .filter(|&byte| byte == b'\n')
+                .count()
+                + 1
         });
 
-        Ok(Self { path, line_starts, line_count, stderr_line })
+        Ok(Self {
+            path,
+            line_starts,
+            line_count,
+            stderr_line,
+        })
     }
 
     fn read_page(&self, start: usize, count: usize) -> io::Result<Vec<PageLine>> {
@@ -157,7 +181,8 @@ impl GotFile {
         let end = self.line_count.min(start.saturating_add(count));
         let mut page = Vec::with_capacity(end - start);
         for _ in start..end {
-            let Some((text, truncated)) = read_line_limited(&mut reader, GOT_PAGE_LINE_MAX_BYTES)? else {
+            let Some((text, truncated)) = read_line_limited(&mut reader, GOT_PAGE_LINE_MAX_BYTES)?
+            else {
                 break;
             };
             page.push(PageLine { text, truncated });
@@ -218,7 +243,10 @@ fn read_line_limited<R: BufRead>(reader: &mut R, max: usize) -> io::Result<Optio
     if buffer.last() == Some(&b'\r') {
         buffer.pop();
     }
-    Ok(Some((String::from_utf8_lossy(&buffer).to_string(), truncated)))
+    Ok(Some((
+        String::from_utf8_lossy(&buffer).to_string(),
+        truncated,
+    )))
 }
 
 pub struct TestCase {
@@ -325,7 +353,8 @@ impl TestCase {
     }
 
     fn output_rows_uncapped(&self) -> usize {
-        self.expected_lines_uncapped().max(self.got_lines_uncapped())
+        self.expected_lines_uncapped()
+            .max(self.got_lines_uncapped())
     }
 
     fn full_height(&self) -> usize {
@@ -366,7 +395,11 @@ impl TestCase {
     /// Collapsed cases keep one blank row below the title so stacked collapsed
     /// cases do not touch.
     pub fn row_height(&self) -> usize {
-        if self.collapsed { COLLAPSED_HEIGHT } else { self.full_height() }
+        if self.collapsed {
+            COLLAPSED_HEIGHT
+        } else {
+            self.full_height()
+        }
     }
 
     pub fn clear_hit_areas(&mut self) {
@@ -433,8 +466,12 @@ impl TestCase {
     }
 
     pub fn got_page_lines(&self, start: usize, count: usize) -> Vec<Line<'static>> {
-        let Some(file) = &self.got_file else { return Vec::new() };
-        let Ok(page) = file.read_page(start, count) else { return Vec::new() };
+        let Some(file) = &self.got_file else {
+            return Vec::new();
+        };
+        let Ok(page) = file.read_page(start, count) else {
+            return Vec::new();
+        };
         let expected = self.exp_content.lines();
         let diff = matches!(self.verdict, CaseVerdict::WA { .. });
 
@@ -459,10 +496,9 @@ impl TestCase {
                     Line::styled(line.text, style)
                 };
                 if line.truncated {
-                    rendered.spans.push(Span::styled(
-                        "…",
-                        Style::new().fg(theme::MUTED).italic(),
-                    ));
+                    rendered
+                        .spans
+                        .push(Span::styled("…", Style::new().fg(theme::MUTED).italic()));
                 }
                 rendered
             })
@@ -482,10 +518,17 @@ impl TestCase {
     /// to warn: empty and stderr-only results have nothing to compare.
     pub fn got_dialog_view(&self) -> (Vec<Line<'static>>, Option<&'static str>) {
         if self.got_is_paged() {
-            return (self.got_page_lines(0, GOT_PAGE_LINES), Some(PAGED_OUTPUT_NOTE));
+            return (
+                self.got_page_lines(0, GOT_PAGE_LINES),
+                Some(PAGED_OUTPUT_NOTE),
+            );
         }
         if self.output_too_large {
-            let warning = self.got_content.as_deref().is_some_and(has_stdout).then_some(LARGE_OUTPUT_WARNING);
+            let warning = self
+                .got_content
+                .as_deref()
+                .is_some_and(has_stdout)
+                .then_some(LARGE_OUTPUT_WARNING);
             return (self.got_view(), warning);
         }
         let Some(got) = self.dialog_source() else {
@@ -514,8 +557,10 @@ impl TestCase {
             } else {
                 Style::new()
             };
-            let mut lines: Vec<Line<'static>> =
-                stdout.lines().map(|line| Line::styled(line.to_string(), style)).collect();
+            let mut lines: Vec<Line<'static>> = stdout
+                .lines()
+                .map(|line| Line::styled(line.to_string(), style))
+                .collect();
             if lines.is_empty() {
                 lines.push(Line::default());
             }
@@ -527,7 +572,14 @@ impl TestCase {
         lines
     }
 
-    pub fn draw_tc(&mut self, buf: &mut Buffer, area: Rect, index: usize, active_box: ActiveBox, focus: CaseFocus) {
+    pub fn draw_tc(
+        &mut self,
+        buf: &mut Buffer,
+        area: Rect,
+        index: usize,
+        active_box: ActiveBox,
+        focus: CaseFocus,
+    ) {
         self.area.rect = area;
         self.collapse_toggle_area.rect = Rect {
             x: area.x,
@@ -558,11 +610,8 @@ impl TestCase {
         let chip = self.verdict.chip();
         if !chip.is_empty() {
             tc_block = tc_block.title(
-                Line::from(Span::styled(
-                    chip,
-                    Style::new().fg(verdict_color).bold(),
-                ))
-                .alignment(Right),
+                Line::from(Span::styled(chip, Style::new().fg(verdict_color).bold()))
+                    .alignment(Right),
             );
         }
 
@@ -629,8 +678,11 @@ impl TestCase {
         );
 
         let got_width = inner_width(self.got_box.rect);
-        let got_lines: Vec<Line<'static>> =
-            self.got_view().into_iter().map(|line| clip_line(line, got_width)).collect();
+        let got_lines: Vec<Line<'static>> = self
+            .got_view()
+            .into_iter()
+            .map(|line| clip_line(line, got_width))
+            .collect();
         let got_border = if deleting { theme::RED } else { verdict_border };
         let got_title = if deleting { theme::RED } else { theme::MUTED };
         let got_panel = Paragraph::new(Text::from(got_lines))
@@ -695,8 +747,11 @@ impl TestCase {
             } else {
                 Style::new()
             };
-            let mut lines: Vec<Line<'static>> =
-                stdout.text.lines().map(|line| Line::styled(line.to_string(), style)).collect();
+            let mut lines: Vec<Line<'static>> = stdout
+                .text
+                .lines()
+                .map(|line| Line::styled(line.to_string(), style))
+                .collect();
             if lines.is_empty() {
                 lines.push(Line::default());
             }
@@ -707,9 +762,8 @@ impl TestCase {
             lines.extend(stderr.text.lines().map(|line| Line::from(line.to_string())));
         }
 
-        let skipped_diff = matches!(self.verdict, CaseVerdict::WA { .. })
-            && !diffed
-            && !stdout.text.is_empty();
+        let skipped_diff =
+            matches!(self.verdict, CaseVerdict::WA { .. }) && !diffed && !stdout.text.is_empty();
         if self.got_truncated {
             lines.push(muted(OUTPUT_TRUNCATED_NOTE.to_string()));
         } else if skipped_diff {
@@ -767,8 +821,10 @@ impl TestCase {
                 .block(pane_block)
             } else {
                 let width = inner_width(state.rect);
-                let lines: Vec<Line<'static>> =
-                    pane_lines(&text).into_iter().map(|line| clip_line(line, width)).collect();
+                let lines: Vec<Line<'static>> = pane_lines(&text)
+                    .into_iter()
+                    .map(|line| clip_line(line, width))
+                    .collect();
                 Paragraph::new(Text::from(lines))
                     .style(Style::new().fg(theme::TEXT))
                     .block(pane_block)
@@ -812,10 +868,8 @@ const INLINE_PREVIEW_MAX_BYTES: usize = 24_000;
 const DIALOG_SAFE_MAX_BYTES: usize = 10_000_000;
 /// A huge number of short lines is just as bad as a huge byte count.
 const DIALOG_SAFE_MAX_LINES: usize = 20_000;
-const LARGE_OUTPUT_WARNING: &str =
-    "Output is too large to show fully. Showing a bounded preview.";
-pub(crate) const PAGED_OUTPUT_NOTE: &str =
-    "Large output · paged view · diff is computed per page";
+const LARGE_OUTPUT_WARNING: &str = "Output is too large to show fully. Showing a bounded preview.";
+pub(crate) const PAGED_OUTPUT_NOTE: &str = "Large output · paged view · diff is computed per page";
 /// A WA diff is only useful on a screenful. Larger previews are shown plain.
 const WA_DIFF_MAX_CHARS: usize = 8_000;
 const COLLAPSED_HEIGHT: usize = 2;
@@ -930,7 +984,9 @@ fn truncation_note(caps: &[Capped]) -> Option<Line<'static>> {
     let chars_cut = caps.iter().any(|capped| capped.chars_cut);
 
     if hidden > 0 {
-        Some(muted(format!("… {hidden} more lines hidden ({total} total)")))
+        Some(muted(format!(
+            "… {hidden} more lines hidden ({total} total)"
+        )))
     } else if chars_cut {
         Some(muted(OUTPUT_TRUNCATED_NOTE.to_string()))
     } else {
@@ -975,7 +1031,9 @@ fn clip_line(line: Line<'static>, max_width: usize) -> Line<'static> {
         }
         used += width;
         match spans.last_mut() {
-            Some(last) if last.style == grapheme.style => last.content.to_mut().push_str(grapheme.symbol),
+            Some(last) if last.style == grapheme.style => {
+                last.content.to_mut().push_str(grapheme.symbol)
+            }
             _ => spans.push(Span::styled(grapheme.symbol.to_string(), grapheme.style)),
         }
     }
@@ -989,13 +1047,17 @@ fn offset_rect(rect: Rect, dx: i32, dy: i32) -> Rect {
     if x < 0 || y < 0 {
         return Rect::default();
     }
-    Rect { x: x as u16, y: y as u16, ..rect }
+    Rect {
+        x: x as u16,
+        y: y as u16,
+        ..rect
+    }
 }
 
-/// The Got pane on WA: the program's output, exactly as printed. Lines are
-/// aligned first; within an aligned line, a character is painted red when it
-/// differs from the expected output at the same position. Missing characters
-/// are never invented.
+/// The Got pane on WA: the program's output, exactly as printed. Each line is
+/// compared with the expected line at the same index; within a line, a
+/// character is painted red when it differs at that position. Missing
+/// characters are never invented.
 pub(crate) fn highlight_got(expected: &str, got: &str) -> Vec<Line<'static>> {
     highlight_got_inner(expected, got, true)
 }
@@ -1012,23 +1074,18 @@ fn highlight_got_inner(expected: &str, got: &str, capped: bool) -> Vec<Line<'sta
     } else {
         expected.to_string()
     };
-    let got = if capped { Capped::new(got).text } else { got.to_string() };
+    let got = if capped {
+        Capped::new(got).text
+    } else {
+        got.to_string()
+    };
 
     let expected_lines: Vec<&str> = expected.lines().collect();
     let got_lines: Vec<&str> = got.lines().collect();
-    let aligned = align_lines(&expected_lines, &got_lines);
 
     let mut lines = Vec::with_capacity(got_lines.len().max(1));
-    let mut next_expected = 0;
     for (index, got_line) in got_lines.iter().enumerate() {
-        let expected_line = match aligned[index] {
-            Some(expected_index) => {
-                next_expected = expected_index + 1;
-                Some(expected_lines[expected_index])
-            }
-            None => expected_lines.get(next_expected).copied(),
-        };
-        lines.push(match expected_line {
+        lines.push(match expected_lines.get(index) {
             Some(expected_line) => line_from_runs(line_runs(expected_line, got_line)),
             None => {
                 let text = got_line.trim_end();
@@ -1046,45 +1103,46 @@ fn highlight_got_inner(expected: &str, got: &str, capped: bool) -> Vec<Line<'sta
     lines
 }
 
-fn align_lines(expected: &[&str], got: &[&str]) -> Vec<Option<usize>> {
-    let n = expected.len();
-    let m = got.len();
-    if n.saturating_mul(m) > 250_000 {
-        return (0..m).map(|j| (j < n).then_some(j)).collect();
-    }
-
-    let mut dp = vec![vec![0usize; m + 1]; n + 1];
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            dp[i][j] = if expected[i].trim_end() == got[j].trim_end() {
-                dp[i + 1][j + 1] + 1
-            } else {
-                dp[i + 1][j].max(dp[i][j + 1])
-            };
-        }
-    }
-
-    let mut aligned = vec![None; m];
-    let (mut i, mut j) = (0, 0);
-    while i < n && j < m {
-        if expected[i].trim_end() == got[j].trim_end() {
-            aligned[j] = Some(i);
-            i += 1;
-            j += 1;
-        } else if dp[i + 1][j] >= dp[i][j + 1] {
-            i += 1;
-        } else {
-            j += 1;
-        }
-    }
-    aligned
-}
-
 fn line_runs(expected: &str, got: &str) -> Vec<(bool, String)> {
     let expected: Vec<char> = expected.trim_end().chars().collect();
+    let got: Vec<char> = got.trim_end().chars().collect();
+    let mut matched = vec![false; got.len()];
+
+    // Align characters within the already-aligned line. This prevents one
+    // insertion from painting the entire suffix red, while the size guard
+    // keeps pathological single lines out of an O(n*m) diff.
+    if expected.len().saturating_mul(got.len()) <= 40_000 {
+        let mut dp = vec![vec![0usize; got.len() + 1]; expected.len() + 1];
+        for i in (0..expected.len()).rev() {
+            for j in (0..got.len()).rev() {
+                dp[i][j] = if expected[i] == got[j] {
+                    dp[i + 1][j + 1] + 1
+                } else {
+                    dp[i + 1][j].max(dp[i][j + 1])
+                };
+            }
+        }
+        let (mut i, mut j) = (0, 0);
+        while i < expected.len() && j < got.len() {
+            if expected[i] == got[j] {
+                matched[j] = true;
+                i += 1;
+                j += 1;
+            } else if dp[i + 1][j] >= dp[i][j + 1] {
+                i += 1;
+            } else {
+                j += 1;
+            }
+        }
+    } else {
+        for (index, ch) in got.iter().enumerate() {
+            matched[index] = expected.get(index) == Some(ch);
+        }
+    }
+
     let mut runs: Vec<(bool, String)> = Vec::new();
-    for (index, ch) in got.trim_end().chars().enumerate() {
-        let red = expected.get(index) != Some(&ch);
+    for (index, ch) in got.into_iter().enumerate() {
+        let red = !matched[index];
         match runs.last_mut() {
             Some((last_red, text)) if *last_red == red => text.push(ch),
             _ => runs.push((red, String::from(ch))),
@@ -1096,9 +1154,7 @@ fn line_runs(expected: &str, got: &str) -> Vec<(bool, String)> {
 fn line_from_runs(runs: Vec<(bool, String)>) -> Line<'static> {
     let spans: Vec<Span<'static>> = runs
         .into_iter()
-        .map(|(red, text)| {
-            Span::styled(text, if red { extra_style() } else { Style::new() })
-        })
+        .map(|(red, text)| Span::styled(text, if red { extra_style() } else { Style::new() }))
         .collect();
     Line::from(spans)
 }
@@ -1127,13 +1183,19 @@ mod tests {
 
     #[test]
     fn editing_caps_a_tall_case_to_the_viewport() {
-        let input = (0..100).map(|i| format!("line-{i:03}")).collect::<Vec<_>>().join("\n");
+        let input = (0..100)
+            .map(|i| format!("line-{i:03}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let mut tc = TestCase::new(&input, "ok");
         let full = tc.row_height();
         assert!(full > 14);
 
         tc.fit_to_height(14);
-        assert!(tc.row_height() <= 14, "the active case must fit the list viewport");
+        assert!(
+            tc.row_height() <= 14,
+            "the active case must fit the list viewport"
+        );
         tc.clear_height_caps();
         assert_eq!(tc.row_height(), full);
     }
@@ -1237,7 +1299,11 @@ mod tests {
         let mut tc = TestCase::new("1", "");
         let before = tc.row_height();
         tc.inp_content.insert_newline();
-        assert_eq!(tc.row_height(), before + 1, "the empty line under the cursor must count");
+        assert_eq!(
+            tc.row_height(),
+            before + 1,
+            "the empty line under the cursor must count"
+        );
     }
 
     fn red_spans(line: &Line<'static>) -> Vec<String> {
@@ -1249,7 +1315,10 @@ mod tests {
     }
 
     fn contents<'a>(line: &'a Line<'static>) -> Vec<&'a str> {
-        line.spans.iter().map(|span| span.content.as_ref()).collect()
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
     }
 
     #[test]
@@ -1262,14 +1331,22 @@ mod tests {
             got[0].spans.iter().all(|span| span.style.bg.is_none()),
             "the diff only colors text, never background blocks"
         );
-        assert!(got[0].spans.iter().all(|span| span.style.bg != Some(theme::GREEN)));
+        assert!(
+            got[0]
+                .spans
+                .iter()
+                .all(|span| span.style.bg != Some(theme::GREEN))
+        );
     }
 
     #[test]
     fn diff_marks_the_shifted_tail_after_a_missing_newline() {
         // With the line break missing, every following character sits one
         // place off — so all of it is marked.
-        let got = highlight_got("hi there\nthis is kushal goyal", "hi therethis is kushal goyal");
+        let got = highlight_got(
+            "hi there\nthis is kushal goyal",
+            "hi therethis is kushal goyal",
+        );
         assert_eq!(got.len(), 1);
         assert_eq!(contents(&got[0]), vec!["hi there", "this is kushal goyal"]);
         assert_eq!(red_spans(&got[0]), vec!["this is kushal goyal"]);
@@ -1277,33 +1354,33 @@ mod tests {
 
     #[test]
     fn diff_never_invents_missing_characters() {
-        // expected "lskdjf" vs got "lkej": k/e/j sit where s/k/d should be, so
-        // they are all red; the missing s/d/f never appear in the pane.
+        // expected "lskdjf" vs got "lkej": l, k, and j can be aligned; the
+        // missing s/d/f never appear in the pane, and e stays red.
         let got = highlight_got("lskdjf", "lkej");
         assert_eq!(got.len(), 1);
-        assert_eq!(contents(&got[0]), vec!["l", "kej"]);
-        assert_eq!(red_spans(&got[0]), vec!["kej"]);
+        assert_eq!(contents(&got[0]), vec!["lk", "e", "j"]);
+        assert_eq!(red_spans(&got[0]), vec!["e"]);
 
-        // expected "lskjf" vs got "lkej": the trailing j does land correctly,
-        // so only k and e are red.
+        // expected "lskjf" vs got "lkej": the trailing j lands correctly, so
+        // only e is red.
         let got = highlight_got("lskjf", "lkej");
-        assert_eq!(contents(&got[0]), vec!["l", "ke", "j"]);
-        assert_eq!(red_spans(&got[0]), vec!["ke"]);
+        assert_eq!(contents(&got[0]), vec!["lk", "e", "j"]);
+        assert_eq!(red_spans(&got[0]), vec!["e"]);
     }
 
     #[test]
-    fn diff_aligns_lines_before_coloring_characters() {
+    fn diff_is_positional_across_lines() {
         let got = highlight_got("a\nb\nc", "a\nx\nb\nc");
         assert_eq!(got.len(), 4);
         assert!(red_spans(&got[0]).is_empty());
         assert_eq!(red_spans(&got[1]), vec!["x"]);
-        assert!(red_spans(&got[2]).is_empty());
-        assert!(red_spans(&got[3]).is_empty());
+        assert_eq!(red_spans(&got[2]), vec!["b"]);
+        assert_eq!(red_spans(&got[3]), vec!["c"]);
 
         let got = highlight_got("a\nb\nc", "a\nc");
         assert_eq!(got.len(), 2);
         assert!(red_spans(&got[0]).is_empty());
-        assert!(red_spans(&got[1]).is_empty());
+        assert_eq!(red_spans(&got[1]), vec!["c"]);
     }
 
     #[test]
@@ -1311,8 +1388,24 @@ mod tests {
         let got = highlight_got("abc\n144\ntail", "abcdef\n144\ntail");
         assert_eq!(got.len(), 3);
         assert_eq!(red_spans(&got[0]), vec!["def"]);
-        assert!(red_spans(&got[1]).is_empty(), "the identical 144 line stays plain");
+        assert!(
+            red_spans(&got[1]).is_empty(),
+            "the identical 144 line stays plain"
+        );
         assert!(red_spans(&got[2]).is_empty());
+    }
+
+    #[test]
+    fn diff_matches_characters_within_each_line() {
+        let got = highlight_got("1\n2\n0\n3", "0 1\n2 1\n1 0\n5 3");
+        assert_eq!(contents(&got[0]), vec!["0 ", "1"]);
+        assert_eq!(red_spans(&got[0]), vec!["0 "]);
+        assert_eq!(contents(&got[1]), vec!["2", " 1"]);
+        assert_eq!(red_spans(&got[1]), vec![" 1"]);
+        assert_eq!(contents(&got[2]), vec!["1 ", "0"]);
+        assert_eq!(red_spans(&got[2]), vec!["1 "]);
+        assert_eq!(contents(&got[3]), vec!["5 ", "3"]);
+        assert_eq!(red_spans(&got[3]), vec!["5 "]);
     }
 
     #[test]
@@ -1323,7 +1416,10 @@ mod tests {
 
     #[test]
     fn capped_reports_hidden_lines_and_cut_characters() {
-        let many = (0..500).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
+        let many = (0..500)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         let capped = Capped::new(&many);
         assert_eq!(capped.raw_lines, 500);
         assert_eq!(capped.shown_lines, DIFF_MAX_LINES);
@@ -1345,10 +1441,19 @@ mod tests {
         let small = pane_lines("a\nb");
         assert_eq!(small.len(), 2);
 
-        let many = (0..500).map(|i| i.to_string()).collect::<Vec<_>>().join("\n");
+        let many = (0..500)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         let capped = pane_lines(&many);
         assert_eq!(capped.len(), DIFF_MAX_LINES + 1);
-        assert!(capped.last().unwrap().to_string().contains("200 more lines hidden"));
+        assert!(
+            capped
+                .last()
+                .unwrap()
+                .to_string()
+                .contains("200 more lines hidden")
+        );
     }
 
     #[test]
@@ -1370,7 +1475,11 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let area = buffer.area;
         (0..area.height)
-            .map(|y| (0..area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -1387,14 +1496,31 @@ mod tests {
         assert!(tc.got_truncated());
         assert!(tc.got_content.as_ref().unwrap().len() <= INLINE_PREVIEW_MAX_BYTES);
         let rows = tc.got_lines();
-        assert!(rows < 20, "huge output must not inflate the pane: {rows} rows");
+        assert!(
+            rows < 20,
+            "huge output must not inflate the pane: {rows} rows"
+        );
         assert_eq!(tc.row_height(), 1 + 3 + rows + 2);
-        assert!(tc.got_view().last().unwrap().to_string().contains("output truncated"));
+        assert!(
+            tc.got_view()
+                .last()
+                .unwrap()
+                .to_string()
+                .contains("output truncated")
+        );
 
         let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
         let area = Rect::new(0, 0, 80, tc.row_height() as u16);
         terminal
-            .draw(|frame| tc.draw_tc(frame.buffer_mut(), area, 1, ActiveBox::None, CaseFocus::None))
+            .draw(|frame| {
+                tc.draw_tc(
+                    frame.buffer_mut(),
+                    area,
+                    1,
+                    ActiveBox::None,
+                    CaseFocus::None,
+                )
+            })
             .unwrap();
 
         let screen = screen_of(&terminal);
@@ -1413,12 +1539,20 @@ mod tests {
         assert!(tc.got_truncated());
         assert!(tc.got_content.as_ref().unwrap().len() <= INLINE_PREVIEW_MAX_BYTES);
         assert!(tc.pane_text(PaneKind::Got).len() <= INLINE_PREVIEW_MAX_BYTES);
-        assert!(!tc.wa_diff_active(), "huge WA output must bypass the diff path");
+        assert!(
+            !tc.wa_diff_active(),
+            "huge WA output must bypass the diff path"
+        );
 
         let view = tc.got_view();
         assert!(view.len() <= DIFF_MAX_LINES + 2);
         assert!(view.iter().all(|line| red_spans(line).is_empty()));
-        assert!(view.last().unwrap().to_string().contains("output truncated"));
+        assert!(
+            view.last()
+                .unwrap()
+                .to_string()
+                .contains("output truncated")
+        );
 
         // Repeated redraws walk only the retained 24 KB preview, never the
         // original 2 MB string.
@@ -1430,7 +1564,10 @@ mod tests {
     #[test]
     fn wa_previews_over_the_diff_budget_are_plain_not_diffed() {
         let mut tc = TestCase::new("x", "y");
-        tc.set_result(CaseVerdict::WA { ms: 1 }, "a".repeat(WA_DIFF_MAX_CHARS + 10));
+        tc.set_result(
+            CaseVerdict::WA { ms: 1 },
+            "a".repeat(WA_DIFF_MAX_CHARS + 10),
+        );
 
         assert!(!tc.got_truncated(), "the retention cap was not reached");
         assert!(!tc.wa_diff_active(), "large previews must not be diffed");
@@ -1443,7 +1580,10 @@ mod tests {
     fn safe_large_output_is_retained_for_the_dialog_but_not_the_live_pane() {
         let mut tc = TestCase::new("x", "y");
         let line = "A".repeat(60);
-        let output = (0..600).map(|_| line.as_str()).collect::<Vec<_>>().join("\n");
+        let output = (0..600)
+            .map(|_| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(output.len() > INLINE_PREVIEW_MAX_BYTES);
         assert!(output.len() <= DIALOG_SAFE_MAX_BYTES);
         tc.set_result(CaseVerdict::WA { ms: 1 }, output);
@@ -1451,18 +1591,30 @@ mod tests {
         assert!(tc.got_truncated());
         assert!(!tc.output_too_large);
         assert!(tc.got_content.as_ref().unwrap().len() <= INLINE_PREVIEW_MAX_BYTES);
-        assert!(tc.got_view().last().unwrap().to_string().contains("output truncated"));
+        assert!(
+            tc.got_view()
+                .last()
+                .unwrap()
+                .to_string()
+                .contains("output truncated")
+        );
 
         let (lines, warning) = tc.got_dialog_view();
         assert!(warning.is_none(), "safe output must not warn");
         assert_eq!(lines.len(), 600, "the dialog keeps the full output");
-        assert!(!red_spans(&lines[0]).is_empty(), "the dialog keeps the full WA diff");
+        assert!(
+            !red_spans(&lines[0]).is_empty(),
+            "the dialog keeps the full WA diff"
+        );
     }
 
     #[test]
     fn output_over_the_line_budget_is_paged_instead_of_dropped() {
         let mut tc = TestCase::new("x", "y");
-        let output = (0..=DIALOG_SAFE_MAX_LINES).map(|_| "A").collect::<Vec<_>>().join("\n");
+        let output = (0..=DIALOG_SAFE_MAX_LINES)
+            .map(|_| "A")
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(output.len() < DIALOG_SAFE_MAX_BYTES);
         tc.set_result(CaseVerdict::WA { ms: 1 }, output);
 
@@ -1473,8 +1625,15 @@ mod tests {
 
         let (lines, warning) = tc.got_dialog_view();
         assert_eq!(warning, Some(PAGED_OUTPUT_NOTE));
-        assert_eq!(lines.len(), GOT_PAGE_LINES, "the dialog reads one page at a time");
-        assert!(!red_spans(&lines[0]).is_empty(), "paged WA output still diffs");
+        assert_eq!(
+            lines.len(),
+            GOT_PAGE_LINES,
+            "the dialog reads one page at a time"
+        );
+        assert!(
+            !red_spans(&lines[0]).is_empty(),
+            "paged WA output still diffs"
+        );
     }
 
     #[test]
@@ -1501,7 +1660,10 @@ mod tests {
         let stderr = format!(
             "{}{}",
             STDERR_MARKER,
-            (0..=DIALOG_SAFE_MAX_LINES).map(|_| "e").collect::<Vec<_>>().join("\n")
+            (0..=DIALOG_SAFE_MAX_LINES)
+                .map(|_| "e")
+                .collect::<Vec<_>>()
+                .join("\n")
         );
         tc.set_result(CaseVerdict::WA { ms: 1 }, stderr);
         assert!(tc.got_is_paged());

@@ -40,7 +40,6 @@ pub fn scroll_to_show(cursor: usize, scroll: usize, visible: usize, total: usize
     scroll.min(max_scroll)
 }
 
-
 /// A scrollbar grab in progress. The first press records the thumb offset so
 /// dragging moves the thumb with the pointer instead of snapping it to the
 /// cursor, which is what makes the drag feel smooth.
@@ -77,23 +76,29 @@ impl ScrollbarDrag {
 
         let origin = if vertical { area.y } else { area.x } + begin_len as u16;
         let pointer_index = if vertical { pointer.y } else { pointer.x };
-        let index = pointer_index.saturating_sub(origin).min(track_len as u16 - 1) as usize;
+        let index = pointer_index
+            .saturating_sub(origin)
+            .min(track_len as u16 - 1) as usize;
         let (thumb_start, thumb_len) = thumb_geometry(track_len, content_length, position);
 
-        let (grab_offset, start, scroll) = if index >= thumb_start && index < thumb_start + thumb_len
-        {
-            // Grabbing the thumb itself must not move the content at all.
-            (
-                index - thumb_start,
-                thumb_start,
-                position.min(content_length),
-            )
-        } else {
-            let start = index
-                .saturating_sub(thumb_len / 2)
-                .min(track_len.saturating_sub(thumb_len));
-            (index - start, start, scroll_for(start, track_len, thumb_len, content_length))
-        };
+        let (grab_offset, start, scroll) =
+            if index >= thumb_start && index < thumb_start + thumb_len {
+                // Grabbing the thumb itself must not move the content at all.
+                (
+                    index - thumb_start,
+                    thumb_start,
+                    position.min(content_length),
+                )
+            } else {
+                let start = index
+                    .saturating_sub(thumb_len / 2)
+                    .min(track_len.saturating_sub(thumb_len));
+                (
+                    index - start,
+                    start,
+                    scroll_for(start, track_len, thumb_len, content_length),
+                )
+            };
 
         let drag = Self {
             vertical,
@@ -174,10 +179,13 @@ fn thumb_geometry(track_len: usize, content_length: usize, position: usize) -> (
     if max_viewport_position == 0 {
         return (0, track_len);
     }
-    let thumb_len = round_div(viewport.saturating_mul(track_len), max_viewport_position)
-        .clamp(1, track_len);
-    let thumb_start = round_div(start_position.saturating_mul(track_len), max_viewport_position)
-        .clamp(0, track_len.saturating_sub(thumb_len));
+    let thumb_len =
+        round_div(viewport.saturating_mul(track_len), max_viewport_position).clamp(1, track_len);
+    let thumb_start = round_div(
+        start_position.saturating_mul(track_len),
+        max_viewport_position,
+    )
+    .clamp(0, track_len.saturating_sub(thumb_len));
     (thumb_start, thumb_len)
 }
 
@@ -224,7 +232,10 @@ pub struct Message {
 
 impl Message {
     pub fn new(color: Color, text: impl Into<String>) -> Self {
-        Self { color, text: text.into() }
+        Self {
+            color,
+            text: text.into(),
+        }
     }
 }
 
@@ -234,7 +245,9 @@ pub struct VisualState {
 
 impl VisualState {
     pub fn new() -> Self {
-        Self { rect: Rect::default() }
+        Self {
+            rect: Rect::default(),
+        }
     }
 
     pub fn check_hover(&self, mouse: &MouseEvent) -> bool {
@@ -269,7 +282,10 @@ mod tests {
 
         assert_eq!(scroll, position, "grabbing the thumb must not jump");
         let moved = drag.scroll_at(Position::new(0, (grab_y + 1) as u16));
-        assert!(moved > scroll, "dragging one row must move the scroll position");
+        assert!(
+            moved > scroll,
+            "dragging one row must move the scroll position"
+        );
         assert!(
             moved - scroll < 10,
             "one row must be a small step, not a jump: {moved} vs {scroll}"
@@ -298,5 +314,4 @@ mod tests {
             "one row must not jump across the file: {moved} vs {scroll}"
         );
     }
-
 }

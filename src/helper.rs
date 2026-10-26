@@ -10,7 +10,11 @@ use std::{
 use ratatui::{
     Frame,
     crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind},
-    layout::{Alignment, Position, Rect, Constraint::{Length, Min, Percentage}, Layout},
+    layout::{
+        Alignment,
+        Constraint::{Length, Min, Percentage},
+        Layout, Position, Rect,
+    },
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Clear, Paragraph, Scrollbar, ScrollbarState},
@@ -18,8 +22,7 @@ use ratatui::{
 
 use crate::{
     components::{
-        ScrollbarDrag,
-        block,
+        ScrollbarDrag, block,
         config::ConfigMenu,
         dir_terminal::DirTerminal,
         splash::render,
@@ -32,9 +35,9 @@ use crate::{
         theme,
     },
     core::{
-        ActiveProblem, HelperCommand, ReceivingTestCase,
+        ActiveProblem, HelperCommand,
         PassingCommand::{self, ToHelper, ToRunner, ToSubmitter},
-        RunnerCommand, RunAction, SubmitConfig, SubmitterCommand, Verdict,
+        ReceivingTestCase, RunAction, RunnerCommand, SubmitConfig, SubmitterCommand, Verdict,
         fs_ops::FsOps,
         submitter::{self, SubmissionInfo},
     },
@@ -67,14 +70,23 @@ impl DialogContent {
     fn total_lines(&self) -> usize {
         match self {
             Self::Lines(lines) => lines.len(),
-            Self::Paged { line_count, warning, .. } => line_count + usize::from(*warning),
+            Self::Paged {
+                line_count,
+                warning,
+                ..
+            } => line_count + usize::from(*warning),
         }
     }
 
     fn max_width(&self) -> usize {
         match self {
             Self::Lines(lines) => lines.iter().map(Line::width).max().unwrap_or(0),
-            Self::Paged { page, warning, page_start, .. } => {
+            Self::Paged {
+                page,
+                warning,
+                page_start,
+                ..
+            } => {
                 let warning_width = if *warning && *page_start == 0 {
                     Line::from(PAGED_OUTPUT_NOTE).width()
                 } else {
@@ -290,8 +302,11 @@ impl Helper {
         ])
         .split(main_area);
 
-        self.dir_terminal
-            .draw_input(frame, chunks[0], matches!(self.input_mode, InputMode::Directory));
+        self.dir_terminal.draw_input(
+            frame,
+            chunks[0],
+            matches!(self.input_mode, InputMode::Directory),
+        );
 
         let list_area = chunks[1];
         if list_area.width > 0 && list_area.height > 0 {
@@ -355,7 +370,9 @@ impl Helper {
     }
 
     fn submissions_max_scroll(&self) -> usize {
-        self.submissions.len().saturating_sub(self.submissions_viewport())
+        self.submissions
+            .len()
+            .saturating_sub(self.submissions_viewport())
     }
 
     /// Wheel scrolling inside the submissions panel (hovered area only).
@@ -425,7 +442,10 @@ impl Helper {
                     "⚠"
                 };
                 Line::from(vec![
-                    Span::styled(format!(" {glyph} "), Style::new().fg(submission.color).bold()),
+                    Span::styled(
+                        format!(" {glyph} "),
+                        Style::new().fg(submission.color).bold(),
+                    ),
                     Span::styled(format!("{} ", submission.label), Style::new().bold()),
                     Span::styled(
                         format!("· {}", submission.message),
@@ -435,7 +455,10 @@ impl Helper {
             })
             .collect();
 
-        frame.render_widget(Paragraph::new(lines).block(block(Some(" Submissions "))), list_area);
+        frame.render_widget(
+            Paragraph::new(lines).block(block(Some(" Submissions "))),
+            list_area,
+        );
 
         if needs_scrollbar {
             let scrollbar = Scrollbar::new(ratatui::widgets::ScrollbarOrientation::VerticalRight)
@@ -563,7 +586,9 @@ impl Helper {
     }
 
     fn draw_submit_modal(&self, frame: &mut Frame, area: Rect) {
-        let Some(pending) = &self.pending_submit else { return };
+        let Some(pending) = &self.pending_submit else {
+            return;
+        };
         let info = &pending.info;
 
         let width = 76.min(area.width.saturating_sub(4));
@@ -614,7 +639,11 @@ impl Helper {
             row(
                 "Browser",
                 browser,
-                if info.safari_available { theme::PURPLE } else { theme::RED },
+                if info.safari_available {
+                    theme::PURPLE
+                } else {
+                    theme::RED
+                },
             ),
             row(
                 "Local tests",
@@ -637,7 +666,9 @@ impl Helper {
 
     fn draw_delete_modal(&self, frame: &mut Frame, area: Rect) {
         let total = self.tc_list.testcases.len();
-        let Some(tc) = self.tc_list.testcases.get(self.tc_list.active_area) else { return };
+        let Some(tc) = self.tc_list.testcases.get(self.tc_list.active_area) else {
+            return;
+        };
 
         let width = 66.min(area.width.saturating_sub(4));
         let height = 9.min(area.height);
@@ -710,7 +741,8 @@ impl Helper {
         match self.begin_run() {
             Ok(command) => Some(command),
             Err(refusal) => {
-                self.dir_terminal.set_error(refusal.color(), refusal.message());
+                self.dir_terminal
+                    .set_error(refusal.color(), refusal.message());
                 None
             }
         }
@@ -759,7 +791,11 @@ impl Helper {
                 format!(
                     "running {} case{} · TL {}ms",
                     problem.test_cases.len(),
-                    if problem.test_cases.len() == 1 { "" } else { "s" },
+                    if problem.test_cases.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
                     problem.effective_time_limit()
                 )
             },
@@ -802,8 +838,10 @@ impl Helper {
 
     pub fn cmd_add(&mut self) -> bool {
         if self.active_problem.is_none() {
-            self.dir_terminal
-                .set_error(theme::RED, "no active problem — receive one to add custom cases");
+            self.dir_terminal.set_error(
+                theme::RED,
+                "no active problem — receive one to add custom cases",
+            );
             return false;
         }
         // Editing mutates cases the runner may still be writing to — retire the run.
@@ -812,13 +850,6 @@ impl Helper {
         self.tc_list.add_tc();
         self.expand_all_cases();
         self.sync_problem_tests();
-        self.dir_terminal.set_hint(
-            theme::MUTED,
-            format!(
-                "editing case {} · [Tab/Shift+Tab] switch field · [Esc] save",
-                self.tc_list.testcases.len()
-            ),
-        );
         true
     }
 
@@ -831,8 +862,6 @@ impl Helper {
         self.input_mode = InputMode::Editing;
         self.tc_list.focus_first();
         self.expand_all_cases();
-        self.dir_terminal
-            .set_hint(theme::MUTED, "editing · [Tab/Shift+Tab] switch field · [Esc] save");
         true
     }
 
@@ -840,19 +869,19 @@ impl Helper {
     /// another one, `Enter` asks for confirmation, and only that deletes.
     pub fn cmd_delete(&mut self) {
         if self.tc_list.testcases.is_empty() {
-            self.dir_terminal.set_error(theme::RED, "no test case to delete");
+            self.dir_terminal
+                .set_error(theme::RED, "no test case to delete");
             return;
         }
         // A stale run must not write verdicts into a list that is about to shift.
         self.cancel_run();
         self.expand_all_cases();
-        self.tc_list.active_area = self.tc_list.active_area.min(self.tc_list.testcases.len() - 1);
+        self.tc_list.active_area = self
+            .tc_list
+            .active_area
+            .min(self.tc_list.testcases.len() - 1);
         self.tc_list.update_scroll();
         self.input_mode = InputMode::DeleteSelect;
-        self.dir_terminal.set_hint(
-            theme::RED,
-            "delete mode · [Tab/Shift+Tab] select case · [Enter] confirm · [Esc] cancel",
-        );
     }
 
     /// Moves the delete selection by one case, wrapping around.
@@ -874,14 +903,21 @@ impl Helper {
         }
         let index = self.tc_list.active_area.min(total - 1);
         self.tc_list.testcases.remove(index);
-        self.tc_list.active_area = self.tc_list.active_area.min(self.tc_list.testcases.len().saturating_sub(1));
+        self.tc_list.active_area = self
+            .tc_list
+            .active_area
+            .min(self.tc_list.testcases.len().saturating_sub(1));
         self.tc_list.active_box = ActiveBox::Input;
         self.tc_list.update_scroll();
         self.input_mode = InputMode::Normal;
         if self.sync_problem_tests() {
             self.dir_terminal.set_result(
                 theme::TEXT,
-                format!("deleted case {} · {} left", index + 1, self.tc_list.testcases.len()),
+                format!(
+                    "deleted case {} · {} left",
+                    index + 1,
+                    self.tc_list.testcases.len()
+                ),
             );
         }
     }
@@ -897,7 +933,8 @@ impl Helper {
 
     pub fn cmd_submit(&mut self) -> Option<PassingCommand> {
         let Some(problem) = &self.active_problem else {
-            self.dir_terminal.set_error(theme::RED, "no active problem to submit");
+            self.dir_terminal
+                .set_error(theme::RED, "no active problem to submit");
             return None;
         };
 
@@ -918,13 +955,10 @@ impl Helper {
                     time_limit: problem.effective_time_limit(),
                 });
                 self.input_mode = InputMode::ConfirmSubmit;
-                self.dir_terminal.set_hint(
-                    theme::PURPLE,
-                    "confirm submission · [Enter] submit · [Backspace] cancel",
-                );
             }
             Err(e) => {
-                self.dir_terminal.set_error(theme::RED, format!("cannot submit: {e}"));
+                self.dir_terminal
+                    .set_error(theme::RED, format!("cannot submit: {e}"));
             }
         }
         None
@@ -938,20 +972,25 @@ impl Helper {
         action: RunAction,
     ) -> (Option<PassingCommand>, Result<String, String>) {
         if let Some(file) = file
-            && let Err(error) = self.set_active_from_file(&file) {
-                return (None, Err(error));
-            }
+            && let Err(error) = self.set_active_from_file(&file)
+        {
+            return (None, Err(error));
+        }
         match action {
             RunAction::Run => match self.begin_run() {
                 Ok(command) => {
                     let cases = self.tc_list.testcases.len();
                     (
                         Some(command),
-                        Ok(format!("running {cases} test case{}", if cases == 1 { "" } else { "s" })),
+                        Ok(format!(
+                            "running {cases} test case{}",
+                            if cases == 1 { "" } else { "s" }
+                        )),
                     )
                 }
                 Err(refusal) => {
-                    self.dir_terminal.set_error(refusal.color(), refusal.message());
+                    self.dir_terminal
+                        .set_error(refusal.color(), refusal.message());
                     (None, Err(refusal.message().to_string()))
                 }
             },
@@ -959,7 +998,10 @@ impl Helper {
                 if self.cmd_add() {
                     (None, Ok("opened a new test case in the TUI".to_string()))
                 } else {
-                    (None, Err("no active problem — receive one first".to_string()))
+                    (
+                        None,
+                        Err("no active problem — receive one first".to_string()),
+                    )
                 }
             }
             RunAction::Edit => {
@@ -972,7 +1014,10 @@ impl Helper {
             RunAction::Submit => {
                 self.cmd_submit();
                 if self.pending_submit.is_some() {
-                    (None, Ok("confirmation opened — finish it in the TUI".to_string()))
+                    (
+                        None,
+                        Ok("confirmation opened — finish it in the TUI".to_string()),
+                    )
                 } else {
                     (None, Err("cannot submit — see the TUI console".to_string()))
                 }
@@ -993,7 +1038,8 @@ impl Helper {
             .claim_problem_stem(&problem.name, &problem.url, &code_dir);
 
         if let Err(e) = self.fs_ops.save_tc_file(&problem) {
-            self.dir_terminal.set_error(theme::RED, format!("failed to save test cases: {e}"));
+            self.dir_terminal
+                .set_error(theme::RED, format!("failed to save test cases: {e}"));
         }
 
         let code_path = self.fs_ops.write_code_file(&problem, &code_dir);
@@ -1003,9 +1049,16 @@ impl Helper {
             "received {} · {} test{} · TL {}ms · saved to {}",
             problem.name,
             problem.test_cases.len(),
-            if problem.test_cases.len() == 1 { "" } else { "s" },
+            if problem.test_cases.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
             problem.effective_time_limit(),
-            code_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+            code_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default()
         );
 
         self.attach_problem(problem);
@@ -1064,13 +1117,19 @@ impl Helper {
             return;
         }
         let total = self.tc_list.testcases.len();
-        let Some(tc) = self.tc_list.testcases.get_mut(index) else { return };
+        let Some(tc) = self.tc_list.testcases.get_mut(index) else {
+            return;
+        };
         let expected = tc.exp_content.lines().join("\n");
 
         let (verdict, got) = match result {
             Verdict::Success { output, time } => {
-                let got = String::from_utf8_lossy(&output.stdout).trim_end().to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).trim_end().to_string();
+                let got = String::from_utf8_lossy(&output.stdout)
+                    .trim_end()
+                    .to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr)
+                    .trim_end()
+                    .to_string();
                 let is_ok = normalized_eq(&got, &expected);
 
                 let mut display = got;
@@ -1088,7 +1147,11 @@ impl Helper {
                 CaseVerdict::Tle,
                 format!(
                     "time limit exceeded (>{:.2}s)",
-                    self.active_problem.as_ref().map(|p| p.effective_time_limit()).unwrap_or(4000) as f64 / 1000.0
+                    self.active_problem
+                        .as_ref()
+                        .map(|p| p.effective_time_limit())
+                        .unwrap_or(4000) as f64
+                        / 1000.0
                 ),
             ),
             Verdict::RuntimeError { error } => (CaseVerdict::RE, error),
@@ -1130,12 +1193,23 @@ impl Helper {
 
         let total = self.tc_list.testcases.len();
         if total == 0 {
-            self.dir_terminal.set_result(theme::YELLOW, "no test cases to run");
+            self.dir_terminal
+                .set_result(theme::YELLOW, "no test cases to run");
             return;
         }
 
-        let passed = self.tc_list.testcases.iter().filter(|tc| tc.verdict.is_ac()).count();
-        let failed = self.tc_list.testcases.iter().filter(|tc| tc.verdict.is_failed()).count();
+        let passed = self
+            .tc_list
+            .testcases
+            .iter()
+            .filter(|tc| tc.verdict.is_ac())
+            .count();
+        let failed = self
+            .tc_list
+            .testcases
+            .iter()
+            .filter(|tc| tc.verdict.is_failed())
+            .count();
         let compile_error = self
             .tc_list
             .testcases
@@ -1166,11 +1240,21 @@ impl Helper {
             )
         };
 
-        self.dir_terminal
-            .set_result(if failed == 0 { theme::GREEN } else { theme::RED }, message);
+        self.dir_terminal.set_result(
+            if failed == 0 {
+                theme::GREEN
+            } else {
+                theme::RED
+            },
+            message,
+        );
 
         if failed > 0
-            && let Some(idx) = self.tc_list.testcases.iter().position(|tc| tc.verdict.is_failed())
+            && let Some(idx) = self
+                .tc_list
+                .testcases
+                .iter()
+                .position(|tc| tc.verdict.is_failed())
         {
             self.tc_list.active_area = idx;
             self.tc_list.update_scroll();
@@ -1210,20 +1294,23 @@ impl Helper {
         // Drop a trailing case that was added but left completely empty.
         if self.tc_list.testcases.len() > 1
             && let Some(last) = self.tc_list.testcases.last()
-                && last.inp_content.lines().join("").trim().is_empty()
-                    && last.exp_content.lines().join("").trim().is_empty()
-                {
-                    self.tc_list.remove_last();
-                }
+            && last.inp_content.lines().join("").trim().is_empty()
+            && last.exp_content.lines().join("").trim().is_empty()
+        {
+            self.tc_list.remove_last();
+        }
 
         self.dir_terminal.clear_hint();
         if self.sync_problem_tests() {
-            self.dir_terminal.set_result(theme::TEXT, "test cases saved");
+            self.dir_terminal
+                .set_result(theme::TEXT, "test cases saved");
         }
     }
 
     fn sync_problem_tests(&mut self) -> bool {
-        let Some(problem) = &mut self.active_problem else { return false };
+        let Some(problem) = &mut self.active_problem else {
+            return false;
+        };
         problem.test_cases = self
             .tc_list
             .testcases
@@ -1235,14 +1322,17 @@ impl Helper {
             .collect();
         let snapshot = problem.clone();
         if let Err(e) = self.fs_ops.save_tc_file(&snapshot) {
-            self.dir_terminal.set_error(theme::RED, format!("failed to save: {e}"));
+            self.dir_terminal
+                .set_error(theme::RED, format!("failed to save: {e}"));
             return false;
         }
         true
     }
 
     fn open_pane_dialog(&mut self, index: usize, pane: PaneKind) {
-        let Some(tc) = self.tc_list.testcases.get(index) else { return };
+        let Some(tc) = self.tc_list.testcases.get(index) else {
+            return;
+        };
         let (label, color) = match pane {
             PaneKind::Input => ("Input", theme::CYAN),
             PaneKind::Expected => ("Expected", theme::TEXT),
@@ -1272,7 +1362,9 @@ impl Helper {
                     let lines = if text.is_empty() {
                         vec![Line::from("(empty)")]
                     } else {
-                        text.split('\n').map(|line| Line::from(line.to_string())).collect()
+                        text.split('\n')
+                            .map(|line| Line::from(line.to_string()))
+                            .collect()
                     };
                     (lines, None)
                 }
@@ -1298,8 +1390,6 @@ impl Helper {
             color,
         });
         self.last_pane_click = None;
-        self.dir_terminal
-            .set_hint(theme::MUTED, "pane dialog · Esc closes · ↑/↓ scroll · ←/→ pan");
     }
 
     fn handle_pane_dialog_event(&mut self, event: Event) {
@@ -1412,7 +1502,9 @@ impl Helper {
     }
 
     fn scroll_pane_dialog(&mut self, rows: i32) {
-        let Some(dialog) = self.pane_dialog.as_mut() else { return };
+        let Some(dialog) = self.pane_dialog.as_mut() else {
+            return;
+        };
         let max = dialog
             .content
             .total_lines()
@@ -1421,7 +1513,9 @@ impl Helper {
     }
 
     fn set_pane_dialog_scroll(&mut self, scroll: usize) {
-        let Some(dialog) = self.pane_dialog.as_mut() else { return };
+        let Some(dialog) = self.pane_dialog.as_mut() else {
+            return;
+        };
         let max = dialog
             .content
             .total_lines()
@@ -1430,18 +1524,25 @@ impl Helper {
     }
 
     fn scroll_pane_dialog_horizontal(&mut self, columns: i32) {
-        let Some(dialog) = self.pane_dialog.as_mut() else { return };
+        let Some(dialog) = self.pane_dialog.as_mut() else {
+            return;
+        };
         let max = dialog
             .content
             .max_width()
             .saturating_sub(dialog.viewport_width.max(1) as usize);
-        dialog.h_scroll =
-            (dialog.h_scroll as i64 + columns as i64).clamp(0, max as i64) as usize;
+        dialog.h_scroll = (dialog.h_scroll as i64 + columns as i64).clamp(0, max as i64) as usize;
     }
 
     fn draw_pane_dialog(&mut self, frame: &mut Frame, area: Rect) {
-        let Helper { pane_dialog, tc_list, .. } = self;
-        let Some(dialog) = pane_dialog.as_mut() else { return };
+        let Helper {
+            pane_dialog,
+            tc_list,
+            ..
+        } = self;
+        let Some(dialog) = pane_dialog.as_mut() else {
+            return;
+        };
 
         dim_area(frame, area);
 
@@ -1483,7 +1584,9 @@ impl Helper {
 
         let total_lines = dialog.content.total_lines();
         let approximate_viewport = inner.height.saturating_sub(hint_height).max(1) as usize;
-        dialog.scroll = dialog.scroll.min(total_lines.saturating_sub(approximate_viewport));
+        dialog.scroll = dialog
+            .scroll
+            .min(total_lines.saturating_sub(approximate_viewport));
         sync_paged_page(&mut dialog.content, tc_list, dialog.scroll);
 
         let content_width = dialog.content.max_width();
@@ -1502,7 +1605,9 @@ impl Helper {
         }
         dialog.viewport = content_height.max(1);
         dialog.viewport_width = usable_width.max(1);
-        dialog.h_scroll = dialog.h_scroll.min(content_width.saturating_sub(usable_width as usize));
+        dialog.h_scroll = dialog
+            .h_scroll
+            .min(content_width.saturating_sub(usable_width as usize));
 
         let max_scroll = total_lines.saturating_sub(dialog.viewport as usize);
         dialog.scroll = dialog.scroll.min(max_scroll);
@@ -1512,19 +1617,31 @@ impl Helper {
         sync_paged_page(&mut dialog.content, tc_list, scroll);
         let (display_lines, local_scroll) = match &dialog.content {
             DialogContent::Lines(lines) => (lines.clone(), scroll),
-            DialogContent::Paged { page_start, page, warning, .. } => {
+            DialogContent::Paged {
+                page_start,
+                page,
+                warning,
+                ..
+            } => {
                 let warning_rows = usize::from(*warning);
                 let mut display = Vec::new();
                 if *warning && *page_start == 0 {
                     display.push(paged_warning_line(PAGED_OUTPUT_NOTE));
                 }
                 display.extend(page.iter().cloned());
-                let base = if *page_start == 0 { 0 } else { warning_rows + *page_start };
+                let base = if *page_start == 0 {
+                    0
+                } else {
+                    warning_rows + *page_start
+                };
                 (display, scroll.saturating_sub(base))
             }
         };
 
-        let content_area = Rect { height: content_height, ..inner };
+        let content_area = Rect {
+            height: content_height,
+            ..inner
+        };
         frame.render_widget(
             Paragraph::new(Text::from(display_lines)).scroll((
                 local_scroll.min(u16::MAX as usize) as u16,
@@ -1535,8 +1652,8 @@ impl Helper {
 
         dialog.v_scroll_area = Rect::default();
         if total_lines > dialog.viewport as usize {
-            let mut state = ScrollbarState::new(total_lines - dialog.viewport as usize)
-                .position(dialog.scroll);
+            let mut state =
+                ScrollbarState::new(total_lines - dialog.viewport as usize).position(dialog.scroll);
             let scrollbar = Scrollbar::new(ratatui::widgets::ScrollbarOrientation::VerticalRight)
                 .style(theme::MUTED)
                 .track_style(theme::BORDER)
@@ -1659,10 +1776,6 @@ impl Helper {
                     KeyCode::Enter => self.delete_selected_case(),
                     KeyCode::Backspace | KeyCode::Esc => {
                         self.input_mode = InputMode::DeleteSelect;
-                        self.dir_terminal.set_hint(
-                            theme::RED,
-                            "delete mode · [Tab/Shift+Tab] select case · [Enter] confirm · [Esc] cancel",
-                        );
                     }
                     _ => {}
                 },
@@ -1682,7 +1795,8 @@ impl Helper {
                                 format!("config saved · language {}", config.language.label()),
                             );
                         } else {
-                            self.dir_terminal.set_error(theme::RED, "failed to save config");
+                            self.dir_terminal
+                                .set_error(theme::RED, "failed to save config");
                         }
                     }
                 }
@@ -1702,7 +1816,9 @@ impl Helper {
                                 label: label.clone(),
                                 message: format!(
                                     "submitting to {} {} · {}",
-                                    pending.info.platform, pending.info.problem_code, pending.info.language
+                                    pending.info.platform,
+                                    pending.info.problem_code,
+                                    pending.info.language
                                 ),
                                 color: theme::MUTED,
                                 done: false,
@@ -1764,16 +1880,15 @@ impl Helper {
                 {
                     let hit = self.tc_list.pane_at(mouse.column, mouse.row);
                     let double = hit.is_some_and(|(index, pane)| {
-                        self.last_pane_click.is_some_and(|(at, last_index, last_pane)| {
-                            last_index == index
-                                && last_pane == pane
-                                && at.elapsed() < Duration::from_millis(450)
-                        })
+                        self.last_pane_click
+                            .is_some_and(|(at, last_index, last_pane)| {
+                                last_index == index
+                                    && last_pane == pane
+                                    && at.elapsed() < Duration::from_millis(450)
+                            })
                     });
                     self.last_pane_click = hit.map(|(index, pane)| (Instant::now(), index, pane));
-                    if double
-                        && let Some((index, pane)) = hit
-                    {
+                    if double && let Some((index, pane)) = hit {
                         self.open_pane_dialog(index, pane);
                         return None;
                     }
@@ -1856,8 +1971,14 @@ mod tests {
             url: "https://codeforces.com/contest/2266/problem/E".into(),
             time_limit: 2000,
             test_cases: vec![
-                ReceivingTestCase { input: "1 2".into(), expected_output: "3".into() },
-                ReceivingTestCase { input: "5".into(), expected_output: "10".into() },
+                ReceivingTestCase {
+                    input: "1 2".into(),
+                    expected_output: "3".into(),
+                },
+                ReceivingTestCase {
+                    input: "5".into(),
+                    expected_output: "10".into(),
+                },
             ],
             code_file: PathBuf::new(),
         }
@@ -1904,12 +2025,21 @@ mod tests {
         let mut second = sample_problem();
         second.name = "A. Shared".into();
         second.url = "https://codeforces.com/contest/2222/problem/A".into();
-        second.test_cases =
-            vec![ReceivingTestCase { input: "9".into(), expected_output: "9".into() }];
+        second.test_cases = vec![ReceivingTestCase {
+            input: "9".into(),
+            expected_output: "9".into(),
+        }];
         let second_path = helper.new_problem(second).unwrap();
 
-        assert_eq!(first_path.file_stem().unwrap().to_string_lossy(), "A__Shared");
-        let second_stem = second_path.file_stem().unwrap().to_string_lossy().to_string();
+        assert_eq!(
+            first_path.file_stem().unwrap().to_string_lossy(),
+            "A__Shared"
+        );
+        let second_stem = second_path
+            .file_stem()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         assert!(second_stem.starts_with("A__Shared__"), "{second_stem}");
         assert_ne!(first_path, second_path);
 
@@ -1917,7 +2047,10 @@ mod tests {
         assert_eq!(first_saved.test_cases[0].input, "1 2");
         let second_saved = fs_ops.load_problem_by_stem(&second_stem).unwrap();
         assert_eq!(second_saved.test_cases[0].input, "9");
-        assert_eq!(second_saved.url, "https://codeforces.com/contest/2222/problem/A");
+        assert_eq!(
+            second_saved.url,
+            "https://codeforces.com/contest/2222/problem/A"
+        );
         assert_ne!(
             fs_ops.binary_dir.join(&first_saved.name),
             fs_ops.binary_dir.join(&second_saved.name)
@@ -1948,14 +2081,36 @@ mod tests {
         let mut second = sample_problem();
         second.name = "A. Anonymous".into();
         second.url.clear();
-        second.test_cases =
-            vec![ReceivingTestCase { input: "9".into(), expected_output: "9".into() }];
+        second.test_cases = vec![ReceivingTestCase {
+            input: "9".into(),
+            expected_output: "9".into(),
+        }];
         let second_path = helper.new_problem(second).unwrap();
 
-        assert_eq!(first_path.file_stem().unwrap().to_string_lossy(), "A__Anonymous");
-        assert_eq!(second_path.file_stem().unwrap().to_string_lossy(), "A__Anonymous__2");
-        assert_eq!(fs_ops.load_problem_by_stem("A__Anonymous").unwrap().test_cases[0].input, "1 2");
-        assert_eq!(fs_ops.load_problem_by_stem("A__Anonymous__2").unwrap().test_cases[0].input, "9");
+        assert_eq!(
+            first_path.file_stem().unwrap().to_string_lossy(),
+            "A__Anonymous"
+        );
+        assert_eq!(
+            second_path.file_stem().unwrap().to_string_lossy(),
+            "A__Anonymous__2"
+        );
+        assert_eq!(
+            fs_ops
+                .load_problem_by_stem("A__Anonymous")
+                .unwrap()
+                .test_cases[0]
+                .input,
+            "1 2"
+        );
+        assert_eq!(
+            fs_ops
+                .load_problem_by_stem("A__Anonymous__2")
+                .unwrap()
+                .test_cases[0]
+                .input,
+            "9"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1981,30 +2136,53 @@ mod tests {
         assert_eq!(helper.tc_list.testcases.len(), 2);
 
         let results = [
-            Verdict::Success { output: ok_output("3\n"), time: 4 },
-            Verdict::Success { output: ok_output("0\n"), time: 9 },
+            Verdict::Success {
+                output: ok_output("3\n"),
+                time: 4,
+            },
+            Verdict::Success {
+                output: ok_output("0\n"),
+                time: 9,
+            },
         ];
         // Results are applied one at a time, exactly as they arrive from the runner.
         helper.apply_case_result(helper.run_id, 0, results[0].clone());
-        assert!(matches!(helper.tc_list.testcases[0].verdict, CaseVerdict::AC { ms: 4 }));
-        assert!(matches!(helper.tc_list.testcases[1].verdict, CaseVerdict::Pending));
+        assert!(matches!(
+            helper.tc_list.testcases[0].verdict,
+            CaseVerdict::AC { ms: 4 }
+        ));
+        assert!(matches!(
+            helper.tc_list.testcases[1].verdict,
+            CaseVerdict::Pending
+        ));
 
         helper.apply_case_result(helper.run_id, 1, results[1].clone());
         helper.run_finished(helper.run_id, 0);
         terminal.draw(|f| helper.draw(f)).unwrap();
 
-        assert!(matches!(helper.tc_list.testcases[1].verdict, CaseVerdict::WA { ms: 9 }));
+        assert!(matches!(
+            helper.tc_list.testcases[1].verdict,
+            CaseVerdict::WA { ms: 9 }
+        ));
         assert!(helper.tc_list.testcases[0].collapsed);
         assert!(!helper.running);
 
         let failures = vec![
             Verdict::TimeLimitExceeded,
-            Verdict::CompilationError { error: "boom".into() },
+            Verdict::CompilationError {
+                error: "boom".into(),
+            },
         ];
         stream(&mut helper, failures);
         terminal.draw(|f| helper.draw(f)).unwrap();
-        assert!(matches!(helper.tc_list.testcases[0].verdict, CaseVerdict::Tle));
-        assert!(matches!(helper.tc_list.testcases[1].verdict, CaseVerdict::CE));
+        assert!(matches!(
+            helper.tc_list.testcases[0].verdict,
+            CaseVerdict::Tle
+        ));
+        assert!(matches!(
+            helper.tc_list.testcases[1].verdict,
+            CaseVerdict::CE
+        ));
 
         dump_screen(&terminal);
 
@@ -2083,7 +2261,10 @@ mod tests {
             helper.tc_list.testcases.iter().all(|tc| !tc.collapsed),
             "delete selection must show every case open"
         );
-        assert!(!helper.running, "an in-flight run is retired before the list shifts");
+        assert!(
+            !helper.running,
+            "an in-flight run is retired before the list shifts"
+        );
         terminal.draw(|f| helper.draw(f)).unwrap();
         dump_screen(&terminal);
 
@@ -2098,7 +2279,11 @@ mod tests {
         // Enter opens the confirmation; Esc there goes back to the selection.
         helper.handle_event(key(KeyCode::Enter));
         assert!(matches!(helper.input_mode, InputMode::ConfirmDelete));
-        assert_eq!(helper.tc_list.testcases.len(), 2, "confirmation must not delete yet");
+        assert_eq!(
+            helper.tc_list.testcases.len(),
+            2,
+            "confirmation must not delete yet"
+        );
         terminal.draw(|f| helper.draw(f)).unwrap();
         dump_screen(&terminal);
         helper.handle_event(key(KeyCode::Esc));
@@ -2138,7 +2323,10 @@ mod tests {
         assert_eq!(helper.tc_list.testcases.len(), 1);
         helper.handle_event(key(KeyCode::Esc));
         assert_eq!(helper.tc_list.testcases.len(), 1);
-        assert_eq!(helper.tc_list.testcases[0].inp_content.lines().join("\n"), "x");
+        assert_eq!(
+            helper.tc_list.testcases[0].inp_content.lines().join("\n"),
+            "x"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2200,14 +2388,20 @@ mod tests {
         let pending = helper.pending_submit.as_ref().expect("pending submission");
         assert_eq!(pending.info.platform, "Codeforces");
         assert_eq!(pending.info.problem_code, "E");
-        assert_eq!(pending.info.submit_url, "https://codeforces.com/contest/2266/submit");
+        assert_eq!(
+            pending.info.submit_url,
+            "https://codeforces.com/contest/2266/submit"
+        );
         assert_eq!(pending.info.language_id, Language::Cpp.cf_id(&[]));
         assert_eq!(pending.test_count, 2);
         terminal.draw(|f| helper.draw(f)).unwrap();
         dump_screen(&terminal);
 
         helper.handle_event(key(KeyCode::Char('x')));
-        assert!(helper.pending_submit.is_some(), "other keys must not dismiss the modal");
+        assert!(
+            helper.pending_submit.is_some(),
+            "other keys must not dismiss the modal"
+        );
 
         helper.handle_event(key(KeyCode::Backspace));
         assert!(matches!(helper.input_mode, InputMode::Normal));
@@ -2217,7 +2411,10 @@ mod tests {
         let command = helper.handle_event(key(KeyCode::Enter));
         assert!(matches!(
             command,
-            Some(PassingCommand::ToSubmitter(SubmitterCommand::SubmitCode { id: 1, .. }))
+            Some(PassingCommand::ToSubmitter(SubmitterCommand::SubmitCode {
+                id: 1,
+                ..
+            }))
         ));
         assert_eq!(helper.submissions.len(), 1);
         assert!(!helper.submissions[0].done);
@@ -2249,7 +2446,9 @@ mod tests {
             let command = helper.handle_event(key(KeyCode::Enter));
             assert!(matches!(
                 command,
-                Some(PassingCommand::ToSubmitter(SubmitterCommand::SubmitCode { .. }))
+                Some(PassingCommand::ToSubmitter(
+                    SubmitterCommand::SubmitCode { .. }
+                ))
             ));
         }
         assert_eq!(helper.submissions.len(), 2);
@@ -2274,7 +2473,10 @@ mod tests {
         }
         assert_eq!(helper.submissions.len(), MAX_SUBMISSIONS);
         assert_eq!(helper.submissions.first().unwrap().id, 3);
-        assert_eq!(helper.submissions.last().unwrap().id, 2 + MAX_SUBMISSIONS as u64);
+        assert_eq!(
+            helper.submissions.last().unwrap().id,
+            2 + MAX_SUBMISSIONS as u64
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2313,7 +2515,10 @@ mod tests {
         let footer = (0..buffer.area.width)
             .map(|x| buffer[(x, buffer.area.height - 2)].symbol())
             .collect::<String>();
-        assert!(footer.contains("CONSOLE"), "the footer names the console mode");
+        assert!(
+            footer.contains("CONSOLE"),
+            "the footer names the console mode"
+        );
         assert!(
             !footer.contains("DIRECTORY"),
             "the original UI labels this mode as the console"
@@ -2364,6 +2569,37 @@ mod tests {
     }
 
     #[test]
+    fn console_does_not_repeat_footer_mode_hints() {
+        let root = temp_root("console_mode");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        helper.new_problem(sample_problem());
+        helper.cmd_add();
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| helper.draw(f)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("EDITING"), "the footer still shows the mode");
+        assert!(
+            !screen.contains("switch field"),
+            "the console must not repeat footer key hints:\n{screen}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn footer_does_not_repeat_the_console_run_status() {
         let root = temp_root("footer_busy");
         let fs_ops = FsOps::with_root(root.clone());
@@ -2384,7 +2620,10 @@ mod tests {
             !footer.contains("running tests"),
             "the console owns the run status: {footer}"
         );
-        assert!(footer.contains("[r] run"), "the key hints stay visible: {footer}");
+        assert!(
+            footer.contains("[r] run"),
+            "the key hints stay visible: {footer}"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2412,7 +2651,9 @@ mod tests {
         let row = (0..buffer.area.width)
             .map(|x| buffer[(x, 1)].symbol())
             .collect::<String>();
-        let title_x = row[..row.find("Working Directory").unwrap()].chars().count() as u16;
+        let title_x = row[..row.find("Working Directory").unwrap()]
+            .chars()
+            .count() as u16;
         assert!(
             title_x > buffer.area.width / 2,
             "the directory title sits on the right: {row}"
@@ -2553,7 +2794,10 @@ mod tests {
         helper.submission_scroll = 0;
         terminal.draw(|f| helper.draw(f)).unwrap();
         let scrollbar = helper.submissions_scrollbar_area;
-        assert!(scrollbar.height > 2, "the submissions panel must expose a scrollbar");
+        assert!(
+            scrollbar.height > 2,
+            "the submissions panel must expose a scrollbar"
+        );
         let mouse = |kind, column, row| {
             Event::Mouse(MouseEvent {
                 kind,
@@ -2568,14 +2812,20 @@ mod tests {
             scrollbar.x,
             bottom,
         ));
-        assert!(helper.submission_scroll > 0, "clicking the track must seek down");
+        assert!(
+            helper.submission_scroll > 0,
+            "clicking the track must seek down"
+        );
 
         helper.handle_event(mouse(
             MouseEventKind::Drag(MouseButton::Left),
             scrollbar.x,
             scrollbar.y + 1,
         ));
-        assert_eq!(helper.submission_scroll, 0, "dragging to the top must seek back");
+        assert_eq!(
+            helper.submission_scroll, 0,
+            "dragging to the top must seek back"
+        );
         helper.handle_event(mouse(
             MouseEventKind::Up(MouseButton::Left),
             scrollbar.x,
@@ -2585,7 +2835,10 @@ mod tests {
 
         helper.handle_event(key(KeyCode::Char('s')));
         helper.handle_event(key(KeyCode::Enter));
-        assert_eq!(helper.submission_scroll, 0, "new submission snaps back to newest");
+        assert_eq!(
+            helper.submission_scroll, 0,
+            "new submission snaps back to newest"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2612,8 +2865,14 @@ mod tests {
         );
 
         let message = &helper.dir_terminal.output.as_ref().unwrap().text;
-        assert!(message.contains("running case 1/2"), "live status stays visible: {message}");
-        assert!(!message.contains("AC"), "successful cases must not spam the console: {message}");
+        assert!(
+            message.contains("running case 1/2"),
+            "live status stays visible: {message}"
+        );
+        assert!(
+            !message.contains("AC"),
+            "successful cases must not spam the console: {message}"
+        );
 
         helper.apply_case_result(
             helper.run_id,
@@ -2628,7 +2887,10 @@ mod tests {
 
         helper.run_finished(helper.run_id, 10);
         let message = &helper.dir_terminal.output.as_ref().unwrap().text;
-        assert!(message.contains("1/2 failed"), "the final summary replaces the failure: {message}");
+        assert!(
+            message.contains("1/2 failed"),
+            "the final summary replaces the failure: {message}"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2668,16 +2930,37 @@ mod tests {
 
         let mut helper = Helper::new(work, &fs_ops);
         let mut problem = sample_problem();
-        problem.test_cases = vec![ReceivingTestCase { input: "1".into(), expected_output: String::new() }];
+        problem.test_cases = vec![ReceivingTestCase {
+            input: "1".into(),
+            expected_output: String::new(),
+        }];
         helper.new_problem(problem);
 
         // Output against an empty expected output is a mismatch, not a pass.
-        stream(&mut helper, vec![Verdict::Success { output: ok_output("lkej\n"), time: 1 }]);
-        assert!(matches!(helper.tc_list.testcases[0].verdict, CaseVerdict::WA { .. }));
+        stream(
+            &mut helper,
+            vec![Verdict::Success {
+                output: ok_output("lkej\n"),
+                time: 1,
+            }],
+        );
+        assert!(matches!(
+            helper.tc_list.testcases[0].verdict,
+            CaseVerdict::WA { .. }
+        ));
 
         // Staying silent still passes.
-        stream(&mut helper, vec![Verdict::Success { output: ok_output(""), time: 1 }]);
-        assert!(matches!(helper.tc_list.testcases[0].verdict, CaseVerdict::AC { .. }));
+        stream(
+            &mut helper,
+            vec![Verdict::Success {
+                output: ok_output(""),
+                time: 1,
+            }],
+        );
+        assert!(matches!(
+            helper.tc_list.testcases[0].verdict,
+            CaseVerdict::AC { .. }
+        ));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2694,11 +2977,20 @@ mod tests {
         stream(
             &mut helper,
             vec![
-                Verdict::Success { output: ok_output("3\n"), time: 1 },
-                Verdict::Success { output: ok_output("10\n"), time: 1 },
+                Verdict::Success {
+                    output: ok_output("3\n"),
+                    time: 1,
+                },
+                Verdict::Success {
+                    output: ok_output("10\n"),
+                    time: 1,
+                },
             ],
         );
-        assert!(helper.tc_list.testcases.iter().all(|tc| tc.collapsed), "AC cases auto-collapse");
+        assert!(
+            helper.tc_list.testcases.iter().all(|tc| tc.collapsed),
+            "AC cases auto-collapse"
+        );
 
         helper.handle_event(key(KeyCode::Char('e')));
         assert!(matches!(helper.input_mode, InputMode::Editing));
@@ -2721,12 +3013,24 @@ mod tests {
         helper.new_problem(sample_problem());
         helper.handle_event(key(KeyCode::Char('e')));
         assert!(matches!(helper.input_mode, InputMode::Editing));
-        assert_eq!(helper.tc_list.active_box, crate::components::testcase::ActiveBox::Input);
+        assert_eq!(
+            helper.tc_list.active_box,
+            crate::components::testcase::ActiveBox::Input
+        );
 
         helper.handle_event(key(KeyCode::Tab));
-        assert_eq!(helper.tc_list.active_box, crate::components::testcase::ActiveBox::Expected);
-        helper.handle_event(Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)));
-        assert_eq!(helper.tc_list.active_box, crate::components::testcase::ActiveBox::Input);
+        assert_eq!(
+            helper.tc_list.active_box,
+            crate::components::testcase::ActiveBox::Expected
+        );
+        helper.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::BackTab,
+            KeyModifiers::SHIFT,
+        )));
+        assert_eq!(
+            helper.tc_list.active_box,
+            crate::components::testcase::ActiveBox::Input
+        );
         helper.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
         assert_eq!(
             helper.tc_list.active_box,
@@ -2746,8 +3050,10 @@ mod tests {
 
         let mut helper = Helper::new(work, &fs_ops);
         let mut problem = sample_problem();
-        problem.test_cases[0].input =
-            (0..100).map(|i| format!("line-{i:03}")).collect::<Vec<_>>().join("\n");
+        problem.test_cases[0].input = (0..100)
+            .map(|i| format!("line-{i:03}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         helper.new_problem(problem);
 
         helper.handle_event(key(KeyCode::Char('e')));
@@ -2757,10 +3063,17 @@ mod tests {
 
         let buffer = terminal.backend().buffer();
         let screen = (0..buffer.area.height)
-            .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(screen.contains("line-099"), "the cursor line must stay on screen:\n{screen}");
+        assert!(
+            screen.contains("line-099"),
+            "the cursor line must stay on screen:\n{screen}"
+        );
 
         // Adding more lines must not shift the list under the cursor.
         helper.handle_event(key(KeyCode::Enter));
@@ -2768,10 +3081,17 @@ mod tests {
         terminal.draw(|f| helper.draw(f)).unwrap();
         let buffer = terminal.backend().buffer();
         let screen = (0..buffer.area.height)
-            .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(screen.contains("fresh-line"), "new text must stay on screen:\n{screen}");
+        assert!(
+            screen.contains("fresh-line"),
+            "new text must stay on screen:\n{screen}"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2785,8 +3105,10 @@ mod tests {
 
         let mut helper = Helper::new(work, &fs_ops);
         let mut problem = sample_problem();
-        problem.test_cases[0].input =
-            (0..40).map(|i| format!("line-{i:03}")).collect::<Vec<_>>().join("\n");
+        problem.test_cases[0].input = (0..40)
+            .map(|i| format!("line-{i:03}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         helper.new_problem(problem);
         helper.handle_event(key(KeyCode::Char('e')));
 
@@ -2798,8 +3120,7 @@ mod tests {
         terminal.draw(|f| helper.draw(f)).unwrap();
         dump_screen(&terminal);
         assert_eq!(
-            helper.tc_list.testcases[0].input_box.rect.height,
-            input_height,
+            helper.tc_list.testcases[0].input_box.rect.height, input_height,
             "focusing Expected must not shrink the Input pane"
         );
 
@@ -2815,8 +3136,10 @@ mod tests {
 
         let mut helper = Helper::new(work, &fs_ops);
         let mut problem = sample_problem();
-        problem.test_cases[0].input =
-            (0..40).map(|i| format!("line-{i:03}")).collect::<Vec<_>>().join("\n");
+        problem.test_cases[0].input = (0..40)
+            .map(|i| format!("line-{i:03}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         helper.new_problem(problem);
         helper.handle_event(key(KeyCode::Char('e')));
 
@@ -2835,11 +3158,20 @@ mod tests {
         let before = helper.tc_list.testcases[0].inp_content.cursor().0;
         let list_before = helper.tc_list.scroll_row;
         helper.handle_event(wheel(MouseEventKind::ScrollUp));
-        assert_eq!(helper.tc_list.testcases[0].inp_content.cursor().0, before - 1);
-        assert_eq!(helper.tc_list.scroll_row, list_before, "the list must not move");
+        assert_eq!(
+            helper.tc_list.testcases[0].inp_content.cursor().0,
+            before - 1
+        );
+        assert_eq!(
+            helper.tc_list.scroll_row, list_before,
+            "the list must not move"
+        );
         helper.handle_event(wheel(MouseEventKind::ScrollDown));
         assert!(helper.tc_list.testcases[0].inp_content.cursor().0 <= before);
-        assert_eq!(helper.tc_list.scroll_row, list_before, "the list must not move");
+        assert_eq!(
+            helper.tc_list.scroll_row, list_before,
+            "the list must not move"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2853,9 +3185,15 @@ mod tests {
 
         let mut helper = Helper::new(work, &fs_ops);
         let mut problem = sample_problem();
-        let body = (0..30).map(|i| format!("line-{i:03}")).collect::<Vec<_>>().join("\n");
+        let body = (0..30)
+            .map(|i| format!("line-{i:03}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         problem.test_cases = (0..4)
-            .map(|_| ReceivingTestCase { input: body.clone(), expected_output: "ok".into() })
+            .map(|_| ReceivingTestCase {
+                input: body.clone(),
+                expected_output: "ok".into(),
+            })
             .collect();
         helper.new_problem(problem);
         helper.handle_event(key(KeyCode::Char('e')));
@@ -2873,7 +3211,10 @@ mod tests {
         let scrolled = helper.tc_list.scroll_row;
         assert!(scrolled > 0);
         terminal.draw(|f| helper.draw(f)).unwrap();
-        assert_eq!(helper.tc_list.scroll_row, scrolled, "redraw must not snap back");
+        assert_eq!(
+            helper.tc_list.scroll_row, scrolled,
+            "redraw must not snap back"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2887,9 +3228,15 @@ mod tests {
 
         let mut helper = Helper::new(work, &fs_ops);
         let mut problem = sample_problem();
-        let body = (0..30).map(|i| format!("line-{i:03}")).collect::<Vec<_>>().join("\n");
+        let body = (0..30)
+            .map(|i| format!("line-{i:03}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         problem.test_cases = (0..4)
-            .map(|_| ReceivingTestCase { input: body.clone(), expected_output: "ok".into() })
+            .map(|_| ReceivingTestCase {
+                input: body.clone(),
+                expected_output: "ok".into(),
+            })
             .collect();
         helper.new_problem(problem);
         helper.handle_event(key(KeyCode::Char('x')));
@@ -2906,7 +3253,10 @@ mod tests {
         let scrolled = helper.tc_list.scroll_row;
         assert!(scrolled > 0);
         terminal.draw(|f| helper.draw(f)).unwrap();
-        assert_eq!(helper.tc_list.scroll_row, scrolled, "delete mode keeps manual scroll");
+        assert_eq!(
+            helper.tc_list.scroll_row, scrolled,
+            "delete mode keeps manual scroll"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2975,11 +3325,22 @@ mod tests {
         };
 
         helper.handle_event(click());
-        assert!(helper.pane_dialog.is_none(), "one click must not open the dialog");
+        assert!(
+            helper.pane_dialog.is_none(),
+            "one click must not open the dialog"
+        );
         helper.handle_event(click());
-        let dialog = helper.pane_dialog.as_ref().expect("double click opens the dialog");
+        let dialog = helper
+            .pane_dialog
+            .as_ref()
+            .expect("double click opens the dialog");
         assert!(dialog.title.starts_with("Input · TestCase 1"));
-        assert!(dialog.visible_lines().iter().any(|line| line.to_string() == "1 2"));
+        assert!(
+            dialog
+                .visible_lines()
+                .iter()
+                .any(|line| line.to_string() == "1 2")
+        );
 
         terminal.draw(|f| helper.draw(f)).unwrap();
         dump_screen(&terminal);
@@ -3008,7 +3369,11 @@ mod tests {
         let screen = |terminal: &Terminal<TestBackend>| {
             let buffer = terminal.backend().buffer();
             (0..buffer.area.height)
-                .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         };
@@ -3052,7 +3417,11 @@ mod tests {
         assert!(max > 0);
         assert_eq!(dialog.h_scroll, max, "clicking the track seeks to the end");
 
-        helper.handle_event(mouse(MouseEventKind::Drag(MouseButton::Left), area.x, area.y));
+        helper.handle_event(mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            area.x,
+            area.y,
+        ));
         assert_eq!(
             helper.pane_dialog.as_ref().unwrap().h_scroll,
             0,
@@ -3078,7 +3447,10 @@ mod tests {
         std::fs::create_dir_all(&work).unwrap();
 
         let mut helper = Helper::new(work, &fs_ops);
-        let input = (0..100).map(|index| format!("line-{index:03}")).collect::<Vec<_>>().join("\n");
+        let input = (0..100)
+            .map(|index| format!("line-{index:03}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let mut problem = sample_problem();
         problem.test_cases = vec![ReceivingTestCase {
             input,
@@ -3090,7 +3462,10 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|f| helper.draw(f)).unwrap();
         let area = helper.pane_dialog.as_ref().unwrap().v_scroll_area;
-        assert!(area.height > 2, "the pane dialog must expose a vertical scrollbar");
+        assert!(
+            area.height > 2,
+            "the pane dialog must expose a vertical scrollbar"
+        );
 
         let mouse = |kind, column, row| {
             Event::Mouse(MouseEvent {
@@ -3101,7 +3476,11 @@ mod tests {
             })
         };
         let bottom = area.y + area.height - 2;
-        helper.handle_event(mouse(MouseEventKind::Down(MouseButton::Left), area.x, bottom));
+        helper.handle_event(mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            area.x,
+            bottom,
+        ));
         assert!(
             helper.pane_dialog.as_ref().unwrap().scroll > 0,
             "clicking the track must seek down"
@@ -3117,7 +3496,11 @@ mod tests {
             0,
             "dragging to the top must seek back"
         );
-        helper.handle_event(mouse(MouseEventKind::Up(MouseButton::Left), area.x, area.y + 1));
+        helper.handle_event(mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            area.x,
+            area.y + 1,
+        ));
         assert!(helper.pane_dialog.as_ref().unwrap().v_scroll_drag.is_none());
 
         let _ = std::fs::remove_dir_all(&root);
@@ -3144,11 +3527,20 @@ mod tests {
         };
 
         helper.handle_event(click(2, 2));
-        assert!(helper.pane_dialog.is_some(), "a click inside must not close the dialog");
+        assert!(
+            helper.pane_dialog.is_some(),
+            "a click inside must not close the dialog"
+        );
         helper.handle_event(click(90, 28));
-        assert!(helper.pane_dialog.is_some(), "a click outside must not close the dialog");
+        assert!(
+            helper.pane_dialog.is_some(),
+            "a click outside must not close the dialog"
+        );
         helper.handle_event(key(KeyCode::Enter));
-        assert!(helper.pane_dialog.is_some(), "Enter must not close the dialog");
+        assert!(
+            helper.pane_dialog.is_some(),
+            "Enter must not close the dialog"
+        );
         helper.handle_event(key(KeyCode::Char('q')));
         assert!(helper.pane_dialog.is_some(), "q must not close the dialog");
 
@@ -3176,7 +3568,11 @@ mod tests {
 
         let dialog = helper.pane_dialog.as_ref().expect("dialog opened");
         assert!(matches!(dialog.content, DialogContent::Paged { .. }));
-        assert_eq!(dialog.total_lines(), 20_002, "one warning row plus the output");
+        assert_eq!(
+            dialog.total_lines(),
+            20_002,
+            "one warning row plus the output"
+        );
         assert_eq!(dialog.visible_lines().len(), GOT_PAGE_LINES);
         assert!(
             dialog.visible_lines()[0]
@@ -3190,7 +3586,11 @@ mod tests {
         terminal.draw(|f| helper.draw(f)).unwrap();
         let buffer = terminal.backend().buffer();
         let first_screen = (0..buffer.area.height)
-            .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
@@ -3237,7 +3637,10 @@ mod tests {
         helper.handle_event(click());
         helper.handle_event(click());
 
-        let dialog = helper.pane_dialog.as_ref().expect("double click opens the Got dialog");
+        let dialog = helper
+            .pane_dialog
+            .as_ref()
+            .expect("double click opens the Got dialog");
         assert!(dialog.title.starts_with("Got · TestCase 1"));
         assert!(
             dialog
@@ -3247,7 +3650,12 @@ mod tests {
                 .any(|span| span.style.fg == Some(theme::RED)),
             "safe WA output keeps its red diff in the dialog"
         );
-        assert!(dialog.visible_lines().iter().all(|line| !line.to_string().contains("too large")));
+        assert!(
+            dialog
+                .visible_lines()
+                .iter()
+                .all(|line| !line.to_string().contains("too large"))
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -3276,7 +3684,10 @@ mod tests {
         };
         helper.handle_event(click());
         helper.handle_event(click());
-        assert!(helper.pane_dialog.is_none(), "delete mode must keep its own modal");
+        assert!(
+            helper.pane_dialog.is_none(),
+            "delete mode must keep its own modal"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -3295,7 +3706,10 @@ mod tests {
         type_text(&mut helper, "cd cses");
         helper.handle_event(key(KeyCode::Enter));
 
-        assert_eq!(helper.dir_terminal.cur_dir, work.join("cses").canonicalize().unwrap());
+        assert_eq!(
+            helper.dir_terminal.cur_dir,
+            work.join("cses").canonicalize().unwrap()
+        );
 
         helper.handle_event(key(KeyCode::Esc));
         assert!(matches!(helper.input_mode, InputMode::Normal));
@@ -3329,7 +3743,11 @@ mod tests {
         let fs_ops = FsOps::with_root(root.clone());
         let work = root.join("problems");
         std::fs::create_dir_all(&work).unwrap();
-        assert!(fs_ops.save_config(&UserConfig { language: Language::Python, extra_flags: vec![], ..Default::default() }));
+        assert!(fs_ops.save_config(&UserConfig {
+            language: Language::Python,
+            extra_flags: vec![],
+            ..Default::default()
+        }));
 
         let code_path = work.join("Solo.py");
         std::fs::write(&code_path, "print('hi')\n").unwrap();

@@ -94,7 +94,8 @@ fn plan(config: &SubmitConfig) -> Result<(SubmissionInfo, Platform), AppError> {
     let url = if config.url.is_empty() {
         url_from_file(&code).ok_or_else(|| {
             AppError::ParseError(
-                "no problem URL found (receive the problem with Competitive Companion first)".to_string(),
+                "no problem URL found (receive the problem with Competitive Companion first)"
+                    .to_string(),
             )
         })?
     } else {
@@ -158,14 +159,14 @@ fn detect_platform(url: &str) -> Option<Platform> {
         // Problemset: /problemset/problem/<id>/<index>
         if let Some(i) = segments.iter().position(|s| *s == "problemset")
             && segments.get(i + 1) == Some(&"problem")
-                && let (Some(id), Some(index)) = (segments.get(i + 2), segments.get(i + 3))
-            {
-                return Some(Platform {
-                    submit_url: format!("{origin}/problemset/submit"),
-                    problem_code: format!("{id}{index}"),
-                    ready_selector: "select[name=\"programTypeId\"]",
-                });
-            }
+            && let (Some(id), Some(index)) = (segments.get(i + 2), segments.get(i + 3))
+        {
+            return Some(Platform {
+                submit_url: format!("{origin}/problemset/submit"),
+                problem_code: format!("{id}{index}"),
+                ready_selector: "select[name=\"programTypeId\"]",
+            });
+        }
         return None;
     }
 
@@ -471,7 +472,10 @@ fn temp_file(prefix: &str, suffix: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    std::env::temp_dir().join(format!("cphelper_{prefix}_{}_{nanos}{suffix}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "cphelper_{prefix}_{}_{nanos}{suffix}",
+        std::process::id()
+    ))
 }
 
 fn status_for_line(line: &str) -> Option<String> {
@@ -514,10 +518,11 @@ fn tracking(submit_url: &str) -> (String, String, &'static str) {
 fn strip_metadata(code: &str) -> String {
     let mut out = code.to_string();
     if let Some(start) = out.find("/* === TEST CASES ===")
-        && let Some(end_rel) = out[start..].find("=== END TEST CASES === */") {
-            let end = start + end_rel + "=== END TEST CASES === */".len();
-            out.replace_range(start..end, "");
-        }
+        && let Some(end_rel) = out[start..].find("=== END TEST CASES === */")
+    {
+        let end = start + end_rel + "=== END TEST CASES === */".len();
+        out.replace_range(start..end, "");
+    }
     out.lines()
         .filter(|l| !(l.starts_with("// URL:") || l.starts_with("# URL:")))
         .collect::<Vec<_>>()
@@ -526,7 +531,10 @@ fn strip_metadata(code: &str) -> String {
 
 fn url_from_file(code: &str) -> Option<String> {
     code.lines()
-        .find_map(|l| l.strip_prefix("// URL: ").or_else(|| l.strip_prefix("# URL: ")))
+        .find_map(|l| {
+            l.strip_prefix("// URL: ")
+                .or_else(|| l.strip_prefix("# URL: "))
+        })
         .map(|s| s.trim().to_string())
 }
 
@@ -580,7 +588,12 @@ pub fn submit(
     run_applescript(&platform, &fill_js, &result_js, &tag, notify)
 }
 
-fn build_applescript(platform: &Platform, fill_path: &Path, result_path: &Path, tag: &str) -> String {
+fn build_applescript(
+    platform: &Platform,
+    fill_path: &Path,
+    result_path: &Path,
+    tag: &str,
+) -> String {
     // Quotes inside the inline `do JavaScript` string must be escaped for AppleScript.
     let safe_selector = platform.ready_selector.replace('"', "\\\"");
     let (prefix, results_url, results_mark) = tracking(&platform.submit_url);
@@ -679,7 +692,12 @@ fn run_applescript(
                 } else {
                     stderr_text.trim()
                 };
-                let detail = detail.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or("").trim();
+                let detail = detail
+                    .lines()
+                    .rev()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or("")
+                    .trim();
                 Err(AppError::Io(if detail.is_empty() {
                     format!("osascript exited with {status}")
                 } else {
@@ -711,7 +729,10 @@ mod tests {
     #[test]
     fn detects_codeforces_group_contest() {
         let p = detect_platform("https://codeforces.com/group/xyz/contest/123/problem/A1").unwrap();
-        assert_eq!(p.submit_url, "https://codeforces.com/group/xyz/contest/123/submit");
+        assert_eq!(
+            p.submit_url,
+            "https://codeforces.com/group/xyz/contest/123/submit"
+        );
         assert_eq!(p.problem_code, "A1");
     }
 
@@ -730,7 +751,10 @@ mod tests {
 
     #[test]
     fn interrupted_submissions_classify_as_failed() {
-        assert_eq!(classify("INTERRUPTED: Safari tab was closed"), Outcome::Failed);
+        assert_eq!(
+            classify("INTERRUPTED: Safari tab was closed"),
+            Outcome::Failed
+        );
         assert_eq!(
             classify("TIMED OUT: the judge did not answer (last state: WAIT)"),
             Outcome::Failed
@@ -778,8 +802,14 @@ mod tests {
             !script.contains("id of"),
             "Safari tabs have no scriptable id — identity lookup must not come back"
         );
-        assert!(script.contains("https://codeforces.com/contest/2266/my"), "results URL missing");
-        assert!(script.contains("display notification"), "captcha alert missing");
+        assert!(
+            script.contains("https://codeforces.com/contest/2266/my"),
+            "results URL missing"
+        );
+        assert!(
+            script.contains("display notification"),
+            "captcha alert missing"
+        );
         let script_path = temp_file("testcompile", ".applescript");
         let out_path = temp_file("testcompile", ".scpt");
         fs::write(&script_path, script).unwrap();

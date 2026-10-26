@@ -43,8 +43,7 @@ impl ActiveProblem {
     }
 }
 
-#[derive(Debug, Serialize, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
-#[derive(Default)]
+#[derive(Debug, Serialize, Clone, Copy, Deserialize, PartialEq, Eq, Hash, Default)]
 pub enum Language {
     #[serde(alias = "Cpp17", alias = "Cpp20", alias = "Cpp23")]
     #[default]
@@ -98,7 +97,12 @@ impl Language {
 
     /// Compilation step, `None` for interpreted languages. No flags are added
     /// implicitly — the user's extra flags are passed through verbatim.
-    pub fn compile_cmd(&self, src: &Path, bin: &Path, extra_flags: &[String]) -> Option<(String, Vec<String>)> {
+    pub fn compile_cmd(
+        &self,
+        src: &Path,
+        bin: &Path,
+        extra_flags: &[String],
+    ) -> Option<(String, Vec<String>)> {
         let src = src.to_string_lossy().to_string();
         let bin = bin.to_string_lossy().to_string();
         match self {
@@ -119,7 +123,10 @@ impl Language {
     /// Execution command for one test case.
     pub fn run_cmd(&self, src: &Path, bin: &Path) -> (String, Vec<String>) {
         match self {
-            Language::Python => ("python3".to_string(), vec![src.to_string_lossy().to_string()]),
+            Language::Python => (
+                "python3".to_string(),
+                vec![src.to_string_lossy().to_string()],
+            ),
             Language::Java => {
                 let class = src
                     .file_stem()
@@ -165,9 +172,7 @@ fn std_from_flags(flags: &[String]) -> Option<u32> {
     flags.iter().rev().find_map(|flag| std_from_flag(flag))
 }
 
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[derive(Default)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct UserConfig {
     #[serde(default)]
     pub language: Language,
@@ -180,13 +185,15 @@ pub struct UserConfig {
 impl UserConfig {
     pub fn normalize(&mut self) {
         if self.flags_by_language.is_empty() {
-            self.flags_by_language.insert(self.language, self.extra_flags.clone());
+            self.flags_by_language
+                .insert(self.language, self.extra_flags.clone());
             return;
         }
         match self.flags_by_language.get(&self.language) {
             Some(flags) => self.extra_flags = flags.clone(),
             None => {
-                self.flags_by_language.insert(self.language, self.extra_flags.clone());
+                self.flags_by_language
+                    .insert(self.language, self.extra_flags.clone());
             }
         }
     }
@@ -198,7 +205,6 @@ impl UserConfig {
             .unwrap_or(&self.extra_flags)
     }
 }
-
 
 #[derive(Debug, Clone)]
 pub struct SubmitConfig {
@@ -242,15 +248,31 @@ pub enum HelperCommand {
         reply: Sender<Result<String, String>>,
     },
     /// A live status line while a run compiles / executes.
-    RunPhase { run_id: u64, message: String },
+    RunPhase {
+        run_id: u64,
+        message: String,
+    },
     /// One test case finished — streamed as soon as it completes.
-    CaseResult { run_id: u64, index: usize, verdict: Verdict },
+    CaseResult {
+        run_id: u64,
+        index: usize,
+        verdict: Verdict,
+    },
     /// Every test case of a run finished (or compilation failed).
-    RunFinished { run_id: u64, elapsed_ms: u128 },
+    RunFinished {
+        run_id: u64,
+        elapsed_ms: u128,
+    },
     /// A live status line for one in-flight submission, tagged with its id.
-    SubmitStatus { id: u64, message: String },
+    SubmitStatus {
+        id: u64,
+        message: String,
+    },
     /// A submission reached its final verdict (or failed) — tagged with its id.
-    SubmitFinished { id: u64, result: String },
+    SubmitFinished {
+        id: u64,
+        result: String,
+    },
     Error(String),
     Quit,
 }
@@ -340,7 +362,10 @@ mod tests {
         assert_eq!(Language::Cpp.cf_id(&["-std=c++2b".into()]), "91");
         assert_eq!(Language::Cpp.cf_id(&["-std=c++26".into()]), "91");
         assert_eq!(Language::Cpp.cf_id(&["-std=c++1000".into()]), "54");
-        assert_eq!(Language::Cpp.cf_id(&["-O2".into(), "-std=c++20".into()]), "89");
+        assert_eq!(
+            Language::Cpp.cf_id(&["-O2".into(), "-std=c++20".into()]),
+            "89"
+        );
         assert_eq!(Language::Python.cf_id(&["-std=c++20".into()]), "31");
     }
 

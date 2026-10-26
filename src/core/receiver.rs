@@ -8,8 +8,9 @@ use std::{
 use tiny_http::{Method, Response, Server};
 
 use crate::core::{
-    ActiveProblem, HelperCommand, RunAction,
+    ActiveProblem, HelperCommand,
     PassingCommand::{self, ToHelper},
+    RunAction,
 };
 
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
@@ -90,10 +91,9 @@ fn handle_command_url(url: &str) -> Option<(RunAction, Option<PathBuf>)> {
             for (key, value) in parse_query(query) {
                 match key.as_str() {
                     "action" => action = parse_action(&value),
-                    "file"
-                        if !value.is_empty() => {
-                            file = Some(PathBuf::from(value));
-                        }
+                    "file" if !value.is_empty() => {
+                        file = Some(PathBuf::from(value));
+                    }
                     _ => {}
                 }
             }

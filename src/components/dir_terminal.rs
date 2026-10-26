@@ -12,7 +12,7 @@ use ratatui_textarea::TextArea;
 
 use crate::components::{Message, block, icons, theme};
 
-const CONSOLE_HEIGHT: u16 = 4;
+const CONSOLE_HEIGHT: u16 = 3;
 const HISTORY_LIMIT: usize = 200;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,10 +70,7 @@ impl MessageLanes {
     }
 
     fn is_empty(&self) -> bool {
-        self.hint.is_none()
-            && self.live.is_none()
-            && self.result.is_none()
-            && self.error.is_none()
+        self.hint.is_none() && self.live.is_none() && self.result.is_none() && self.error.is_none()
     }
 
     fn active(&self) -> Option<&Message> {
@@ -84,13 +81,6 @@ impl MessageLanes {
             .or(self.hint.as_ref())
     }
 
-    fn top(&self) -> Option<&Message> {
-        self.live.as_ref().or(self.hint.as_ref())
-    }
-
-    fn bottom(&self) -> Option<&Message> {
-        self.error.as_ref().or(self.result.as_ref())
-    }
 }
 
 struct Completion {
@@ -184,16 +174,27 @@ impl DirTerminal {
         3
     }
 
-    /// The console reserves a fixed two-line body whenever it has anything to
+    /// The console reserves a fixed one-line body whenever it has anything to
     /// show, so incoming messages never resize the rest of the layout.
     pub fn console_height(&self, _width: u16) -> u16 {
-        if self.lanes.is_empty() { 0 } else { CONSOLE_HEIGHT }
+        if self.lanes.is_empty() {
+            0
+        } else {
+            CONSOLE_HEIGHT
+        }
     }
 
     pub fn draw_input(&mut self, frame: &mut Frame, area: Rect, is_active: bool) {
-        let dir_area = Rect { height: area.height.min(self.input_height()), ..area };
+        let dir_area = Rect {
+            height: area.height.min(self.input_height()),
+            ..area
+        };
         let dir_block = block(None)
-            .border_style(if is_active { theme::ACCENT } else { theme::BORDER })
+            .border_style(if is_active {
+                theme::ACCENT
+            } else {
+                theme::BORDER
+            })
             .title_style(Style::new().fg(theme::CYAN).bold())
             .title_alignment(Right);
 
@@ -215,21 +216,20 @@ impl DirTerminal {
             return;
         }
 
-        let line = |message: Option<&Message>| match message {
-            Some(message) => Line::from(Span::styled(
-                message.text.lines().collect::<Vec<_>>().join(" "),
-                Style::new().fg(message.color),
-            )),
-            None => Line::from(""),
+        let Some(message) = self.lanes.active() else {
+            return;
         };
-        let msg_panel = Paragraph::new(vec![line(self.lanes.top()), line(self.lanes.bottom())])
-            .block(
-                block(Some(" [Console] "))
-                    .border_style(theme::BORDER)
-                    .title_alignment(Right)
-                    .title_style(Style::new().fg(theme::PURPLE).bold()),
-            )
-            .wrap(Wrap { trim: false });
+        let msg_panel = Paragraph::new(Line::from(Span::styled(
+            message.text.lines().collect::<Vec<_>>().join(" "),
+            Style::new().fg(message.color),
+        )))
+        .block(
+            block(Some(" [Console] "))
+                .border_style(theme::BORDER)
+                .title_alignment(Right)
+                .title_style(Style::new().fg(theme::PURPLE).bold()),
+        )
+        .wrap(Wrap { trim: false });
         frame.render_widget(msg_panel, area);
     }
 
@@ -273,7 +273,11 @@ impl DirTerminal {
 
         if cmd == "cd" || cmd.starts_with("cd ") {
             let target = cmd[2..].trim();
-            let new_path = if target.is_empty() { self.cur_dir.clone() } else { self.cur_dir.join(target) };
+            let new_path = if target.is_empty() {
+                self.cur_dir.clone()
+            } else {
+                self.cur_dir.join(target)
+            };
 
             match new_path.canonicalize() {
                 Ok(canonical) if canonical.is_dir() => {
@@ -306,7 +310,10 @@ impl DirTerminal {
         } else if cmd == "pwd" {
             self.set_message(theme::CYAN, self.cur_dir.display().to_string());
         } else {
-            self.set_message(theme::YELLOW, format!("unknown command: {cmd} (try: cd <path>, ls, pwd)"));
+            self.set_message(
+                theme::YELLOW,
+                format!("unknown command: {cmd} (try: cd <path>, ls, pwd)"),
+            );
         }
     }
 
@@ -324,7 +331,9 @@ impl DirTerminal {
 
         let line = self.input_area.lines().join("");
 
-        let Some(prefix) = line.strip_prefix("cd ") else { return };
+        let Some(prefix) = line.strip_prefix("cd ") else {
+            return;
+        };
 
         // Split the typed path into the directory to search and the fragment
         // being completed: "cp/qu" → ("cp/", "qu"); "quis" → ("", "quis").
@@ -342,10 +351,16 @@ impl DirTerminal {
             }
         } else {
             let path = PathBuf::from(dir_part);
-            if path.is_absolute() { path } else { self.cur_dir.join(dir_part) }
+            if path.is_absolute() {
+                path
+            } else {
+                self.cur_dir.join(dir_part)
+            }
         };
 
-        let Ok(entries) = fs::read_dir(&search_dir) else { return };
+        let Ok(entries) = fs::read_dir(&search_dir) else {
+            return;
+        };
 
         let needle = fragment.to_lowercase();
         let mut matches: Vec<String> = entries
@@ -369,7 +384,11 @@ impl DirTerminal {
             self.clear_hint();
         } else {
             self.show_matches(&matches, dir_part);
-            self.completion = Some(Completion { dir_part: dir_part.to_string(), matches, next: 0 });
+            self.completion = Some(Completion {
+                dir_part: dir_part.to_string(),
+                matches,
+                next: 0,
+            });
         }
     }
 
@@ -404,7 +423,9 @@ impl DirTerminal {
     }
 
     fn history_down(&mut self) {
-        let Some(index) = self.history_cursor else { return };
+        let Some(index) = self.history_cursor else {
+            return;
+        };
         if index + 1 < self.history.len() {
             self.history_cursor = Some(index + 1);
             self.set_input(&self.history[index + 1].clone());
@@ -468,15 +489,21 @@ mod tests {
         dir.set_live(theme::CYAN, "running case 1/2");
         dir.set_error(theme::RED, "network failed");
         assert_eq!(dir.output.as_ref().unwrap().text, "network failed");
-        assert_eq!(dir.lanes.top().unwrap().text, "running case 1/2");
-        assert_eq!(dir.lanes.bottom().unwrap().text, "network failed");
+        assert_eq!(dir.lanes.live.as_ref().unwrap().text, "running case 1/2");
+        assert_eq!(dir.lanes.error.as_ref().unwrap().text, "network failed");
 
         dir.set_result(theme::GREEN, "all passed");
-        assert_eq!(dir.lanes.top().unwrap().text, "running case 1/2");
-        assert!(dir.lanes.error.is_none(), "a final result supersedes an error");
+        assert_eq!(dir.lanes.live.as_ref().unwrap().text, "running case 1/2");
+        assert!(
+            dir.lanes.error.is_none(),
+            "a final result supersedes an error"
+        );
         assert_eq!(dir.output.as_ref().unwrap().text, "all passed");
         dir.clear_live();
-        assert!(dir.lanes.live.is_none(), "the run lifecycle ends the live phase");
+        assert!(
+            dir.lanes.live.is_none(),
+            "the run lifecycle ends the live phase"
+        );
 
         dir.set_error(theme::RED, "submit failed");
         dir.set_live(theme::CYAN, "running case 2/2");
@@ -488,37 +515,44 @@ mod tests {
     }
 
     #[test]
-    fn console_renders_live_and_result_on_separate_lines() {
+    fn console_renders_the_active_message_on_one_line() {
         let mut dir = DirTerminal::new(PathBuf::from("/tmp"));
         dir.set_live(theme::CYAN, "running case 2/3");
-        dir.set_result(theme::GREEN, "2/3 passed");
 
-        let mut terminal = Terminal::new(TestBackend::new(40, 4)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(40, 3)).unwrap();
         terminal
-            .draw(|frame| dir.draw_console(frame, Rect::new(0, 0, 40, 4)))
+            .draw(|frame| dir.draw_console(frame, Rect::new(0, 0, 40, 3)))
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let row = |y| {
-            (0..40)
-                .map(|x| buffer[(x, y)].symbol())
-                .collect::<String>()
-        };
-        assert!(row(1).contains("running case 2/3"), "live status is the top line");
-        assert!(row(2).contains("2/3 passed"), "the sticky result is the bottom line");
+        let row = |y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+        assert!(row(1).contains("running case 2/3"));
+
+        dir.set_result(theme::GREEN, "2/3 passed");
+        terminal
+            .draw(|frame| dir.draw_console(frame, Rect::new(0, 0, 40, 3)))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = |y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+        assert!(row(1).contains("2/3 passed"));
+        assert!(!row(1).contains("running case 2/3"));
     }
 
     #[test]
-    fn console_height_is_stable_for_short_and_wrapped_messages() {
+    fn console_height_is_one_line_and_stable_for_wrapped_messages() {
         let mut dir = DirTerminal::new(PathBuf::from("/tmp"));
         assert_eq!(dir.console_height(120), 0, "empty consoles take no space");
 
         dir.set_result(theme::TEXT, "short");
-        assert_eq!(dir.console_height(120), 4);
-        assert_eq!(dir.console_height(10), 4);
+        assert_eq!(dir.console_height(120), 3);
+        assert_eq!(dir.console_height(10), 3);
 
         dir.set_result(theme::TEXT, "long ".repeat(500));
-        assert_eq!(dir.console_height(120), 4, "wrapping must not resize the layout");
-        assert_eq!(dir.console_height(10), 4);
+        assert_eq!(
+            dir.console_height(120),
+            3,
+            "wrapping must not resize the layout"
+        );
+        assert_eq!(dir.console_height(10), 3);
     }
 
     #[test]
@@ -562,7 +596,8 @@ mod tests {
         fs::create_dir_all(root.join("projects")).unwrap();
         let mut dir = DirTerminal::new(root.clone());
 
-        dir.input_area.insert_str(format!("cd {}/pro", root.display()));
+        dir.input_area
+            .insert_str(format!("cd {}/pro", root.display()));
         dir.handle_event(tab());
         assert_eq!(typed(&dir), format!("cd {}/projects/", root.display()));
 

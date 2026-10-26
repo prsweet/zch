@@ -83,7 +83,10 @@ fn print_help() {
 fn send_command(action: &str, file: Option<&str>) -> color_eyre::Result<()> {
     use std::io::{Read, Write};
 
-    let port = env::var("ZCH_PORT").ok().and_then(|p| p.parse::<u16>().ok()).unwrap_or(10043);
+    let port = env::var("ZCH_PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(10043);
     let mut path = format!("/command?action={}", core::receiver::url_encode(action));
     if let Some(file) = file
         && !file.is_empty()
@@ -101,7 +104,9 @@ fn send_command(action: &str, file: Option<&str>) -> color_eyre::Result<()> {
     let mut response = String::new();
     let _ = stream.read_to_string(&mut response);
 
-    let (head, body) = response.split_once("\r\n\r\n").unwrap_or((response.as_str(), ""));
+    let (head, body) = response
+        .split_once("\r\n\r\n")
+        .unwrap_or((response.as_str(), ""));
     let status = head.lines().next().unwrap_or_default();
     let body = body.trim();
     if status.contains(" 200 ") {
@@ -174,22 +179,34 @@ fn run_app(terminal: &mut DefaultTerminal, helper: &mut Helper) -> color_eyre::R
                             open_in_zed(&path);
                         }
                     }
-                    HelperCommand::Command { file, action, reply } => {
+                    HelperCommand::Command {
+                        file,
+                        action,
+                        reply,
+                    } => {
                         let (command, outcome) = helper.external_command(file, action);
                         let _ = reply.send(outcome);
                         if let Some(command) = command {
                             let _ = main_tx.send(command);
                         }
                     }
-                    HelperCommand::RunPhase { run_id, message } => helper.run_phase(run_id, message),
-                    HelperCommand::CaseResult { run_id, index, verdict } => {
-                        helper.apply_case_result(run_id, index, verdict)
+                    HelperCommand::RunPhase { run_id, message } => {
+                        helper.run_phase(run_id, message)
                     }
+                    HelperCommand::CaseResult {
+                        run_id,
+                        index,
+                        verdict,
+                    } => helper.apply_case_result(run_id, index, verdict),
                     HelperCommand::RunFinished { run_id, elapsed_ms } => {
                         helper.run_finished(run_id, elapsed_ms)
                     }
-                    HelperCommand::SubmitStatus { id, message } => helper.submit_status(id, message),
-                    HelperCommand::SubmitFinished { id, result } => helper.submit_finished(id, result),
+                    HelperCommand::SubmitStatus { id, message } => {
+                        helper.submit_status(id, message)
+                    }
+                    HelperCommand::SubmitFinished { id, result } => {
+                        helper.submit_finished(id, result)
+                    }
                     HelperCommand::Error(error) => helper.set_error(error),
                     HelperCommand::Quit => return Ok(()),
                 },

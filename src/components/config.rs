@@ -3,8 +3,12 @@ use std::collections::HashMap;
 use ratatui::{
     Frame,
     crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
-    layout::{Constraint::{Length, Percentage}, HorizontalAlignment::Center, Layout, Position},
-    style::{Color, Style, Modifier},
+    layout::{
+        Constraint::{Length, Percentage},
+        HorizontalAlignment::Center,
+        Layout, Position,
+    },
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Clear, Paragraph, Scrollbar, ScrollbarState},
 };
@@ -81,9 +85,14 @@ impl ConfigMenu {
         if !self.draft.is_empty() && !self.commit_draft() {
             return;
         }
-        self.flags_by_language.insert(self.language, self.flags.clone());
+        self.flags_by_language
+            .insert(self.language, self.flags.clone());
         self.language = language;
-        self.flags = self.flags_by_language.get(&language).cloned().unwrap_or_default();
+        self.flags = self
+            .flags_by_language
+            .get(&language)
+            .cloned()
+            .unwrap_or_default();
         self.flag_cursor = self.flags.len().saturating_sub(1);
         self.flag_scroll = 0;
         self.draft = TextArea::default();
@@ -167,14 +176,32 @@ impl ConfigMenu {
         let popup_inner = popup_block.inner(popup_area);
         frame.render_widget(popup_block, popup_area);
 
-        let divisions = Layout::vertical([Length(3), Length(flags_height), Length(3), Length(1)]).split(popup_inner);
+        let divisions = Layout::vertical([Length(3), Length(flags_height), Length(3), Length(1)])
+            .split(popup_inner);
 
         let lang_active = self.active_field == 0;
-        let lang_color = if lang_active { theme::GREEN } else { theme::BORDER };
+        let lang_color = if lang_active {
+            theme::GREEN
+        } else {
+            theme::BORDER
+        };
         let lang_panel = Paragraph::new(Line::from(vec![
-            Span::styled(if lang_active { " ◀ " } else { "   " }, Style::new().fg(lang_color)),
-            Span::styled(self.language.label(), Style::new().bold().fg(if lang_active { theme::GREEN } else { Color::Reset })),
-            Span::styled(if lang_active { " ▶ " } else { "" }, Style::new().fg(lang_color)),
+            Span::styled(
+                if lang_active { " ◀ " } else { "   " },
+                Style::new().fg(lang_color),
+            ),
+            Span::styled(
+                self.language.label(),
+                Style::new().bold().fg(if lang_active {
+                    theme::GREEN
+                } else {
+                    Color::Reset
+                }),
+            ),
+            Span::styled(
+                if lang_active { " ▶ " } else { "" },
+                Style::new().fg(lang_color),
+            ),
         ]))
         .alignment(Center)
         .block(
@@ -231,7 +258,9 @@ impl ConfigMenu {
             for index in self.flag_scroll..end {
                 let selected = index == self.flag_cursor;
                 let style = match (self.delete_stage, selected) {
-                    (DeleteStage::Confirm, true) => Style::new().fg(Color::Black).bg(theme::RED).bold(),
+                    (DeleteStage::Confirm, true) => {
+                        Style::new().fg(Color::Black).bg(theme::RED).bold()
+                    }
                     (DeleteStage::Select, true) => Style::new().fg(theme::RED).bold(),
                     (_, true) if flags_active => Style::new().fg(theme::GREEN).bold(),
                     (_, true) => Style::new().fg(theme::TEXT).bold(),
@@ -246,7 +275,8 @@ impl ConfigMenu {
             frame.render_widget(Paragraph::new(lines), list_area);
 
             if needs_scrollbar {
-                let mut state = ScrollbarState::new(self.flags.len() - list_height).position(self.flag_scroll);
+                let mut state =
+                    ScrollbarState::new(self.flags.len() - list_height).position(self.flag_scroll);
                 let scrollbar = Scrollbar::default()
                     .orientation(ratatui::widgets::ScrollbarOrientation::VerticalRight)
                     .style(theme::MUTED)
@@ -257,7 +287,11 @@ impl ConfigMenu {
             }
         }
 
-        let draft_color = if flags_active && !deleting { theme::GREEN } else { theme::BORDER };
+        let draft_color = if flags_active && !deleting {
+            theme::GREEN
+        } else {
+            theme::BORDER
+        };
         self.draft.set_style(Style::new().fg(theme::TEXT));
         self.draft.set_block(
             block(Some(" Add flag "))
@@ -272,14 +306,21 @@ impl ConfigMenu {
         frame.render_widget(&self.draft, divisions[2]);
 
         let hint = match &self.error {
-            Some(error) => Line::from(Span::styled(format!(" ✘ {error}"), Style::new().fg(theme::RED))),
+            Some(error) => Line::from(Span::styled(
+                format!(" ✘ {error}"),
+                Style::new().fg(theme::RED),
+            )),
             None => match self.delete_stage {
                 DeleteStage::Select => Line::from(Span::styled(
                     " Tab selects · Enter confirms · Esc cancels",
                     Style::new().fg(theme::RED),
                 )),
                 DeleteStage::Confirm => {
-                    let flag = self.flags.get(self.flag_cursor).map(String::as_str).unwrap_or("");
+                    let flag = self
+                        .flags
+                        .get(self.flag_cursor)
+                        .map(String::as_str)
+                        .unwrap_or("");
                     Line::from(Span::styled(
                         format!(" Enter deletes {flag} · Backspace backs out"),
                         Style::new().fg(theme::RED).bold(),
@@ -390,8 +431,8 @@ impl ConfigMenu {
 
         match key.code {
             KeyCode::Tab | KeyCode::BackTab => {
-                let backwards = key.code == KeyCode::BackTab
-                    || key.modifiers.contains(KeyModifiers::SHIFT);
+                let backwards =
+                    key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT);
                 self.active_field = step_wrapped(self.active_field, 2, backwards);
                 self.error = None;
             }
@@ -446,7 +487,9 @@ impl ConfigMenu {
                 }
             } else {
                 let lower = token.to_ascii_lowercase();
-                if self.flags.iter().any(|flag| flag == token) || pending.iter().any(|flag| flag == token) {
+                if self.flags.iter().any(|flag| flag == token)
+                    || pending.iter().any(|flag| flag == token)
+                {
                     self.error = Some(format!("'{token}' is already in the list"));
                     return false;
                 }
@@ -454,7 +497,9 @@ impl ConfigMenu {
                     self.error = Some("write -std=c++20 (no space)".to_string());
                     return false;
                 }
-                if (lower.starts_with("-std=") || lower.starts_with("--std=")) && std_from_flag(token).is_none() {
+                if (lower.starts_with("-std=") || lower.starts_with("--std="))
+                    && std_from_flag(token).is_none()
+                {
                     self.error = Some(format!("invalid standard '{token}' (try c++20)"));
                     return false;
                 }
@@ -488,9 +533,7 @@ mod tests {
     use ratatui::{
         Terminal,
         backend::TestBackend,
-        crossterm::event::{
-            KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-        },
+        crossterm::event::{KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
     };
 
     fn key(code: KeyCode) -> Event {
@@ -499,10 +542,16 @@ mod tests {
 
     fn screen(menu: &mut ConfigMenu, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| menu.draw(frame, frame.area())).unwrap();
+        terminal
+            .draw(|frame| menu.draw(frame, frame.area()))
+            .unwrap();
         let buffer = terminal.backend().buffer();
         let screen = (0..height)
-            .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n");
         if std::env::var("ZCH_DUMP").is_ok() {
@@ -530,10 +579,16 @@ mod tests {
         let mut menu = menu_with(&[]);
         menu.handle_key(key(KeyCode::Tab));
         assert_eq!(menu.active_field, 1);
-        menu.handle_key(Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)));
+        menu.handle_key(Event::Key(KeyEvent::new(
+            KeyCode::BackTab,
+            KeyModifiers::SHIFT,
+        )));
         assert_eq!(menu.active_field, 0);
         menu.handle_key(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
-        assert_eq!(menu.active_field, 1, "a terminal that reports Shift+Tab as Tab must still go back");
+        assert_eq!(
+            menu.active_field, 1,
+            "a terminal that reports Shift+Tab as Tab must still go back"
+        );
     }
 
     #[test]
@@ -603,13 +658,23 @@ mod tests {
 
         type_text(&mut menu, "O2");
         menu.handle_key(key(KeyCode::Enter));
-        assert!(menu.error.as_deref().unwrap_or_default().contains("must start with -"));
+        assert!(
+            menu.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("must start with -")
+        );
         assert_eq!(menu.flags, vec!["-O2"]);
 
         menu.draft = TextArea::default();
         type_text(&mut menu, "-O2");
         menu.handle_key(key(KeyCode::Enter));
-        assert!(menu.error.as_deref().unwrap_or_default().contains("already"));
+        assert!(
+            menu.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("already")
+        );
         assert_eq!(menu.flags, vec!["-O2"]);
     }
 
@@ -620,14 +685,24 @@ mod tests {
 
         type_text(&mut menu, "-std=c++1000");
         menu.handle_key(key(KeyCode::Enter));
-        assert!(menu.error.as_deref().unwrap_or_default().contains("invalid standard"));
+        assert!(
+            menu.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("invalid standard")
+        );
         assert!(menu.flags.is_empty());
         assert_eq!(menu.draft.lines().join(""), "-std=c++1000");
 
         menu.draft = TextArea::default();
         type_text(&mut menu, "-std");
         menu.handle_key(key(KeyCode::Enter));
-        assert!(menu.error.as_deref().unwrap_or_default().contains("no space"));
+        assert!(
+            menu.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no space")
+        );
         assert!(menu.flags.is_empty());
     }
 
@@ -652,7 +727,10 @@ mod tests {
         assert_eq!(menu.flag_cursor, 2, "the newest flag starts selected");
 
         menu.handle_key(key(KeyCode::Up));
-        assert_eq!(menu.flag_cursor, 2, "arrows do not move the flag focus before x");
+        assert_eq!(
+            menu.flag_cursor, 2,
+            "arrows do not move the flag focus before x"
+        );
 
         menu.handle_key(key(KeyCode::Char('x')));
         assert!(matches!(menu.delete_stage, DeleteStage::Select));
@@ -770,23 +848,39 @@ mod tests {
         assert!(area.height > 2, "the flag list must expose a scrollbar");
         let bottom = area.y + area.height - 2;
 
-        menu.handle_mouse(&mouse(MouseEventKind::Down(MouseButton::Left), area.x, bottom));
+        menu.handle_mouse(&mouse(
+            MouseEventKind::Down(MouseButton::Left),
+            area.x,
+            bottom,
+        ));
         let clicked = menu.flag_scroll;
         assert!(clicked > 0, "clicking the track must seek down");
 
-        menu.handle_mouse(&mouse(MouseEventKind::Drag(MouseButton::Left), area.x, bottom - 2));
+        menu.handle_mouse(&mouse(
+            MouseEventKind::Drag(MouseButton::Left),
+            area.x,
+            bottom - 2,
+        ));
         let dragged = menu.flag_scroll;
         assert!(dragged < clicked, "dragging up must scroll back");
         assert!(dragged > 0, "a short drag must not jump to the top");
 
-        menu.handle_mouse(&mouse(MouseEventKind::Up(MouseButton::Left), area.x, bottom - 2));
+        menu.handle_mouse(&mouse(
+            MouseEventKind::Up(MouseButton::Left),
+            area.x,
+            bottom - 2,
+        ));
         assert!(menu.flags_scroll_drag.is_none());
 
         menu.flag_cursor = 0;
         menu.flag_scroll = 0;
         let _ = screen(&mut menu, 100, 30);
         let row = menu.flags_area.y;
-        menu.handle_mouse(&mouse(MouseEventKind::ScrollDown, menu.flags_area.x + 1, row));
+        menu.handle_mouse(&mouse(
+            MouseEventKind::ScrollDown,
+            menu.flags_area.x + 1,
+            row,
+        ));
         assert_eq!(menu.flag_cursor, 1, "the wheel moves the selected flag");
     }
 
