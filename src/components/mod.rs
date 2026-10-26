@@ -2,7 +2,7 @@ use ratatui::{
     crossterm::event::MouseEvent,
     layout::{Position, Rect},
     style::{Color, Style},
-    widgets::{Block, BorderType, Borders, Padding},
+    widgets::{Block, BorderType, Borders, Padding, Scrollbar, ScrollbarOrientation},
 };
 
 pub mod config;
@@ -189,21 +189,111 @@ fn thumb_geometry(track_len: usize, content_length: usize, position: usize) -> (
     (thumb_start, thumb_len)
 }
 
-/// Catppuccin Mocha — fixed truecolor values (no ANSI palette lookups), so the
-/// UI renders identically on every machine regardless of terminal theme.
+/// Active palette. Truecolor only, so the UI does not follow the terminal theme.
+/// `apply` selects Mocha or prsweet's favourite for this thread.
+#[allow(non_snake_case)]
 pub mod theme {
+    use std::cell::Cell;
+
     use ratatui::style::Color;
 
-    pub const BORDER: Color = Color::Rgb(0x45, 0x47, 0x5a);
-    pub const MUTED: Color = Color::Rgb(0x7f, 0x84, 0x9c);
-    pub const TEXT: Color = Color::Rgb(0xcd, 0xd6, 0xf4);
-    pub const ACCENT: Color = Color::Rgb(0x89, 0xb4, 0xfa);
-    pub const GREEN: Color = Color::Rgb(0xa6, 0xe3, 0xa1);
-    pub const RED: Color = Color::Rgb(0xf3, 0x8b, 0xa8);
-    pub const YELLOW: Color = Color::Rgb(0xf9, 0xe2, 0xaf);
-    pub const ORANGE: Color = Color::Rgb(0xfa, 0xb3, 0x87);
-    pub const PURPLE: Color = Color::Rgb(0xcb, 0xa6, 0xf7);
-    pub const CYAN: Color = Color::Rgb(0x94, 0xe2, 0xd5);
+    use crate::core::AppTheme;
+
+    #[derive(Clone, Copy)]
+    struct Palette {
+        border: Color,
+        muted: Color,
+        text: Color,
+        accent: Color,
+        green: Color,
+        red: Color,
+        yellow: Color,
+        orange: Color,
+        purple: Color,
+        cyan: Color,
+        /// Section titles. Mocha keeps these quiet; prsweet uses the syntax title hue.
+        title: Color,
+    }
+
+    /// Catppuccin Mocha. Status colors sit in one lightness band on a dark ground.
+    const MOCHA: Palette = Palette {
+        border: Color::Rgb(0x45, 0x47, 0x5a),
+        muted: Color::Rgb(0x7f, 0x84, 0x9c),
+        text: Color::Rgb(0xcd, 0xd6, 0xf4),
+        accent: Color::Rgb(0x89, 0xb4, 0xfa),
+        green: Color::Rgb(0xa6, 0xe3, 0xa1),
+        red: Color::Rgb(0xf3, 0x8b, 0xa8),
+        yellow: Color::Rgb(0xf9, 0xe2, 0xaf),
+        orange: Color::Rgb(0xfa, 0xb3, 0x87),
+        purple: Color::Rgb(0xcb, 0xa6, 0xf7),
+        cyan: Color::Rgb(0x94, 0xe2, 0xd5),
+        title: Color::Rgb(0x7f, 0x84, 0x9c),
+    };
+
+    /// Raw syntax colors from the prsweet Zed theme, the same ones in the editor:
+    /// pink keywords, lime types, teal functions, gold strings, cyan operators.
+    const PRSWEET: Palette = Palette {
+        border: Color::Rgb(0x3a, 0x41, 0x50),
+        muted: Color::Rgb(0x8b, 0x93, 0xa7),
+        text: Color::Rgb(0xe8, 0xee, 0xfc),
+        accent: Color::Rgb(0x7d, 0xcf, 0xff),
+        green: Color::Rgb(0x9e, 0xce, 0x6a),
+        red: Color::Rgb(0xff, 0x4d, 0x6d),
+        yellow: Color::Rgb(0xe0, 0xaf, 0x68),
+        orange: Color::Rgb(0xff, 0x9e, 0x64),
+        purple: Color::Rgb(0xbb, 0x9a, 0xf7),
+        cyan: Color::Rgb(0x4f, 0xd6, 0xbe),
+        title: Color::Rgb(0x4f, 0xd6, 0xbe),
+    };
+
+    thread_local! {
+        static CURRENT: Cell<AppTheme> = const { Cell::new(AppTheme::Mocha) };
+    }
+
+    pub fn apply(theme: AppTheme) {
+        CURRENT.with(|current| current.set(theme));
+    }
+
+    fn palette() -> Palette {
+        CURRENT.with(|current| match current.get() {
+            AppTheme::Mocha => MOCHA,
+            AppTheme::Prsweet => PRSWEET,
+        })
+    }
+
+    pub fn BORDER() -> Color {
+        palette().border
+    }
+    pub fn MUTED() -> Color {
+        palette().muted
+    }
+    pub fn TEXT() -> Color {
+        palette().text
+    }
+    pub fn ACCENT() -> Color {
+        palette().accent
+    }
+    pub fn GREEN() -> Color {
+        palette().green
+    }
+    pub fn RED() -> Color {
+        palette().red
+    }
+    pub fn YELLOW() -> Color {
+        palette().yellow
+    }
+    pub fn ORANGE() -> Color {
+        palette().orange
+    }
+    pub fn PURPLE() -> Color {
+        palette().purple
+    }
+    pub fn CYAN() -> Color {
+        palette().cyan
+    }
+    pub fn TITLE() -> Color {
+        palette().title
+    }
 }
 
 /// Nerd Font glyphs — private-use codepoints, so every machine with a patched
@@ -218,10 +308,26 @@ pub fn block(title: Option<&str>) -> Block<'static> {
     Block::default()
         .title(if_title.to_string())
         .borders(Borders::ALL)
-        .title_style(Style::new().fg(theme::MUTED).bold())
-        .border_style(theme::BORDER)
+        .title_style(Style::new().fg(theme::TITLE()).bold())
+        .border_style(theme::BORDER())
         .border_type(BorderType::Rounded)
         .padding(Padding::symmetric(1, 0))
+}
+
+/// A one-cell scrollbar with light track and heavy thumb glyphs.
+pub fn scrollbar(orientation: ScrollbarOrientation) -> Scrollbar<'static> {
+    let (thumb, track) = if orientation.is_vertical() {
+        ("┃", "│")
+    } else {
+        ("━", "─")
+    };
+    Scrollbar::new(orientation)
+        .thumb_symbol(thumb)
+        .track_symbol(Some(track))
+        .begin_symbol(None)
+        .end_symbol(None)
+        .style(theme::MUTED())
+        .track_style(theme::BORDER())
 }
 
 #[derive(Debug, Clone)]

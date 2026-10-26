@@ -17,12 +17,12 @@ use ratatui::{
     },
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Clear, Paragraph, Scrollbar, ScrollbarState},
+    widgets::{Block, Clear, Paragraph, ScrollbarOrientation, ScrollbarState},
 };
 
 use crate::{
     components::{
-        ScrollbarDrag, block,
+        ScrollbarDrag, block, scrollbar,
         config::ConfigMenu,
         dir_terminal::DirTerminal,
         splash::render,
@@ -133,7 +133,7 @@ impl PaneDialog {
 }
 
 fn paged_warning_line(text: &'static str) -> Line<'static> {
-    Line::from(Span::styled(text, Style::new().fg(theme::YELLOW).bold()))
+    Line::from(Span::styled(text, Style::new().fg(theme::YELLOW()).bold()))
 }
 
 fn sync_paged_page(content: &mut DialogContent, tc_list: &TestCaseList, scroll: usize) {
@@ -176,8 +176,8 @@ impl RunRefusal {
 
     fn color(self) -> Color {
         match self {
-            Self::AlreadyRunning => theme::YELLOW,
-            Self::NoProblem => theme::RED,
+            Self::AlreadyRunning => theme::YELLOW(),
+            Self::NoProblem => theme::RED(),
         }
     }
 }
@@ -223,14 +223,17 @@ pub struct Helper {
     run_started: Option<Instant>,
     pane_dialog: Option<PaneDialog>,
     last_pane_click: Option<(Instant, usize, PaneKind)>,
+    show_help: bool,
+    adding_case: bool,
 }
 
 impl Helper {
     pub fn new(initial_dir: PathBuf, fs_ops: &FsOps) -> Self {
         let (config, _) = fs_ops.load_config();
+        theme::apply(config.theme);
         let mut dir_terminal = DirTerminal::new(initial_dir);
         dir_terminal.set_hint(
-            theme::CYAN,
+            theme::CYAN(),
             format!(
                 "Ready · listening on 127.0.0.1:{} — send a problem with Competitive Companion",
                 crate::core::receiver::listen_port()
@@ -260,6 +263,8 @@ impl Helper {
             run_started: None,
             pane_dialog: None,
             last_pane_click: None,
+            show_help: false,
+            adding_case: false,
         }
     }
 
@@ -286,29 +291,33 @@ impl Helper {
         let area = frame.area();
 
         let master_border = block(Some(" ZCH "))
-            .border_style(theme::MUTED)
-            .title_style(Style::new().fg(theme::ACCENT).bold());
+            .border_style(theme::MUTED())
+            .title_style(Style::new().fg(theme::ACCENT()).bold());
         let main_area = master_border.inner(area);
         frame.render_widget(master_border, area);
 
         let console_height = self.dir_terminal.console_height(main_area.width);
         let submit_height = self.submissions_height();
         let chunks = Layout::vertical([
-            Length(3),              // working directory / command bar
-            Min(0),                 // test cases
-            Length(submit_height),  // submissions (bottom)
-            Length(console_height), // console (bottom)
-            Length(1),              // footer
+            Length(3),
+            Length(1),
+            Min(0),
+            Length(1),
+            Length(submit_height),
+            Length(console_height),
+            Length(1),
         ])
         .split(main_area);
+        let (header, top_rule, list_area, bottom_rule, submissions, console, footer) = (
+            chunks[0], chunks[1], chunks[2], chunks[3], chunks[4], chunks[5], chunks[6],
+        );
 
         self.dir_terminal.draw_input(
             frame,
-            chunks[0],
+            header,
             matches!(self.input_mode, InputMode::Directory),
         );
 
-        let list_area = chunks[1];
         if list_area.width > 0 && list_area.height > 0 {
             if self.tc_list.testcases.is_empty() {
                 render(
@@ -328,9 +337,11 @@ impl Helper {
             }
         }
 
-        self.draw_submissions(frame, chunks[2]);
-        self.dir_terminal.draw_console(frame, chunks[3]);
-        self.draw_footer(frame, chunks[4]);
+        draw_hairline(frame, top_rule);
+        draw_hairline(frame, bottom_rule);
+        self.draw_submissions(frame, submissions);
+        self.dir_terminal.draw_console(frame, console);
+        self.draw_footer(frame, footer);
 
         match self.input_mode {
             InputMode::Config => {
@@ -350,6 +361,10 @@ impl Helper {
 
         if self.pane_dialog.is_some() {
             self.draw_pane_dialog(frame, area);
+        }
+
+        if self.show_help {
+            self.draw_help(frame, area);
         }
     }
 
@@ -414,7 +429,7 @@ impl Helper {
 
         let needs_scrollbar = total > viewport;
         let (list_area, scrollbar_area) = if needs_scrollbar {
-            let division = Layout::horizontal([Percentage(100), Length(2)]).split(area);
+            let division = Layout::horizontal([Percentage(100), Length(1)]).split(area);
             (division[0], division[1])
         } else {
             (area, Rect::default())
@@ -434,9 +449,9 @@ impl Helper {
             .map(|submission| {
                 let glyph = if !submission.done {
                     spinner
-                } else if submission.color == theme::GREEN {
+                } else if submission.color == theme::GREEN() {
                     "✔"
-                } else if submission.color == theme::RED {
+                } else if submission.color == theme::RED() {
                     "✘"
                 } else {
                     "⚠"
@@ -461,20 +476,18 @@ impl Helper {
         );
 
         if needs_scrollbar {
-            let scrollbar = Scrollbar::new(ratatui::widgets::ScrollbarOrientation::VerticalRight)
-                .style(theme::MUTED)
-                .track_style(theme::BORDER)
-                .begin_symbol(Some("-"))
-                .end_symbol(Some("-"));
             let mut scroll_state = ScrollbarState::new(max_scroll).position(self.submission_scroll);
-            frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scroll_state);
+            frame.render_stateful_widget(
+                scrollbar(ScrollbarOrientation::VerticalRight),
+                scrollbar_area,
+                &mut scroll_state,
+            );
         }
     }
 
     fn draw_footer(&mut self, frame: &mut Frame, area: Rect) {
         let mut spans: Vec<Span> = Vec::new();
-        let key = |k: &str| Span::styled(format!("[{k}]"), Style::new().fg(theme::ACCENT).bold());
-        let hint = |h: &str| Span::styled(h.to_string(), Style::new().fg(theme::MUTED));
+        let key = |k: &str| Span::styled(format!("[{k}]"), Style::new().fg(theme::ACCENT()).bold());
         let badge = |text: &str, color: Color| {
             Span::styled(
                 format!(" {text} "),
@@ -482,107 +495,165 @@ impl Helper {
             )
         };
 
-        match self.input_mode {
-            InputMode::Normal => {
-                for (i, (k, label)) in [
-                    ("a", "add case"),
-                    ("x", "del"),
-                    ("r", "run"),
-                    ("e", "edit"),
-                    ("s", "submit"),
-                    ("d", "dir"),
-                    ("c", "config"),
-                    ("q", "quit"),
-                ]
-                .iter()
-                .enumerate()
-                {
-                    if i > 0 {
-                        spans.push(hint("  "));
-                    }
-                    spans.push(key(k));
-                    spans.push(hint(&format!(" {label}")));
-                }
-                if self.running {
-                    spans.push(hint("  "));
-                    spans.push(key("Esc"));
-                    spans.push(hint(" cancel"));
-                }
-            }
-            InputMode::Editing => {
-                spans.push(badge(
-                    &format!(
-                        "EDITING {} / {}",
-                        self.tc_list.active_area + 1,
-                        self.tc_list.testcases.len()
-                    ),
-                    theme::GREEN,
-                ));
-                spans.push(hint("   "));
-                spans.push(key("Tab"));
-                spans.push(hint(" switch input/expected   "));
-                spans.push(key("Esc"));
-                spans.push(hint(" save & back"));
-            }
-            InputMode::DeleteSelect => {
-                spans.push(badge(
-                    &format!(
-                        "DELETE CASE {} / {}",
-                        self.tc_list.active_area + 1,
-                        self.tc_list.testcases.len()
-                    ),
-                    theme::RED,
-                ));
-                spans.push(hint("   "));
-                spans.push(key("Tab/Shift+Tab"));
-                spans.push(hint(" select case   "));
-                spans.push(key("Enter"));
-                spans.push(hint(" confirm   "));
-                spans.push(key("Esc"));
-                spans.push(hint(" cancel"));
-            }
-            InputMode::ConfirmDelete => {
-                spans.push(badge("CONFIRM DELETE", theme::RED));
-                spans.push(hint("   "));
-                spans.push(key("Enter"));
-                spans.push(hint(" delete   "));
-                spans.push(key("Backspace"));
-                spans.push(hint(" back"));
-            }
+        let (mode, color, keys): (String, Color, &[&str]) = match self.input_mode {
+            InputMode::Normal => (
+                "NORMAL".to_string(),
+                theme::ACCENT(),
+                &["a", "x", "r", "e", "s", "d", "c", "q", "h"],
+            ),
+            InputMode::Editing => (
+                format!(
+                    "EDITING {} / {}",
+                    self.tc_list.active_area + 1,
+                    self.tc_list.testcases.len()
+                ),
+                theme::GREEN(),
+                &["Tab", "⇧Tab", "Esc"],
+            ),
+            InputMode::DeleteSelect => (
+                format!(
+                    "DELETE CASE {} / {}",
+                    self.tc_list.active_area + 1,
+                    self.tc_list.testcases.len()
+                ),
+                theme::RED(),
+                &["Tab", "⇧Tab", "Enter", "Esc"],
+            ),
+            InputMode::ConfirmDelete => (
+                "CONFIRM DELETE".to_string(),
+                theme::RED(),
+                &["Enter", "Backspace"],
+            ),
             InputMode::Directory => {
-                spans.push(badge("CONSOLE", theme::CYAN));
-                spans.push(hint("   cd <path>   ls   pwd   "));
-                spans.push(key("Tab"));
-                spans.push(hint(" complete   "));
-                spans.push(key("Esc"));
-                spans.push(hint(" back"));
+                ("CONSOLE".to_string(), theme::CYAN(), &["Tab", "Esc"])
             }
-            InputMode::Config => {
-                spans.push(badge("CONFIG", theme::YELLOW));
-                spans.push(hint("   "));
-                spans.push(key("Tab"));
-                spans.push(hint(" next field   "));
-                spans.push(key("←/→"));
-                spans.push(hint(" language   "));
-                spans.push(key("Enter"));
-                spans.push(hint(" add   "));
-                spans.push(key("x"));
-                spans.push(hint(" delete   "));
-                spans.push(key("Esc"));
-                spans.push(hint(" save & close"));
-            }
-            InputMode::ConfirmSubmit => {
-                spans.push(badge("CONFIRM SUBMISSION", theme::PURPLE));
-                spans.push(hint("   "));
-                spans.push(key("Enter"));
-                spans.push(hint(" submit   "));
-                spans.push(key("Backspace"));
-                spans.push(hint(" cancel"));
-            }
+            InputMode::Config => (
+                "CONFIG".to_string(),
+                theme::YELLOW(),
+                &["Tab", "←/→", "Enter", "x", "Esc"],
+            ),
+            InputMode::ConfirmSubmit => (
+                "CONFIRM SUBMISSION".to_string(),
+                theme::PURPLE(),
+                &["Enter", "Backspace"],
+            ),
+        };
+
+        spans.push(badge(&mode, color));
+        for key_name in keys {
+            spans.push(Span::raw(" "));
+            spans.push(key(key_name));
+        }
+        if self.running && matches!(self.input_mode, InputMode::Normal) {
+            spans.push(Span::raw(" "));
+            spans.push(key("Esc"));
         }
 
         let footer = Paragraph::new(Line::from(spans)).alignment(Alignment::Center);
         frame.render_widget(footer, area);
+    }
+
+    fn draw_help(&self, frame: &mut Frame, area: Rect) {
+        let rows: &[(&str, &str)] = match self.input_mode {
+            InputMode::Normal => &[
+                ("[a]", "add case"),
+                ("[x]", "delete case"),
+                ("[r]", "run tests"),
+                ("[e]", "edit cases"),
+                ("[s]", "submit"),
+                ("[d]", "console"),
+                ("[c]", "config"),
+                ("[q]", "quit"),
+            ],
+            InputMode::Editing if self.adding_case => &[
+                ("[Tab] [⇧Tab]", "switch input / expected"),
+                ("[Esc]", "save & back"),
+            ],
+            InputMode::Editing => &[
+                ("[Tab] [⇧Tab]", "switch pane / case"),
+                ("[Esc]", "save & back"),
+            ],
+            InputMode::DeleteSelect => &[
+                ("[Tab] [⇧Tab]", "select case"),
+                ("[Enter]", "confirm delete"),
+                ("[Esc]", "cancel"),
+            ],
+            InputMode::ConfirmDelete => &[
+                ("[Enter]", "delete"),
+                ("[Backspace]", "back"),
+            ],
+            InputMode::Directory => &[
+                ("cd <path>", "change directory"),
+                ("ls", "list directory"),
+                ("pwd", "print working directory"),
+                ("[Tab]", "complete"),
+                ("[Esc]", "back"),
+            ],
+            InputMode::Config => &[
+                ("[Tab]", "next field"),
+                ("[←/→]", "language"),
+                ("[Enter]", "add flag"),
+                ("[x]", "delete flag"),
+                ("[Esc]", "save & close"),
+            ],
+            InputMode::ConfirmSubmit => &[
+                ("[Enter]", "submit"),
+                ("[Backspace]", "cancel"),
+            ],
+        };
+
+        let key_width = rows
+            .iter()
+            .map(|(key, _)| key.chars().count())
+            .max()
+            .unwrap_or(0)
+            + 2;
+        let description_width = rows
+            .iter()
+            .map(|(_, description)| description.chars().count())
+            .max()
+            .unwrap_or(0);
+        let close = "  [h] / [F1] / [Esc] close";
+        let width = (key_width + description_width + 6)
+            .max(close.chars().count() + 4)
+            .min(area.width.saturating_sub(4) as usize) as u16;
+        let height = (rows.len() as u16 + 4).min(area.height);
+        let popup = Rect {
+            x: area.x + area.width.saturating_sub(width) / 2,
+            y: area.y + area.height.saturating_sub(height) / 2,
+            width,
+            height,
+        };
+
+        dim_area(frame, area);
+        frame.render_widget(Clear, popup);
+        let border = block(Some(" Keys "))
+            .border_style(theme::ACCENT())
+            .title_style(Style::new().fg(theme::ACCENT()).bold())
+            .title_alignment(Alignment::Center);
+        let inner = border.inner(popup);
+        frame.render_widget(border, popup);
+
+        let mut lines = vec![Line::from("")];
+        for (key, description) in rows {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {:<width$}", key, width = key_width),
+                    Style::new().fg(theme::ACCENT()).bold(),
+                ),
+                Span::styled(*description, Style::new().fg(theme::TEXT())),
+            ]));
+        }
+        lines.push(Line::from(vec![
+            Span::styled("  [h]", Style::new().fg(theme::ACCENT()).bold()),
+            Span::styled(" / ", Style::new().fg(theme::MUTED())),
+            Span::styled("[F1]", Style::new().fg(theme::ACCENT()).bold()),
+            Span::styled(" / ", Style::new().fg(theme::MUTED())),
+            Span::styled("[Esc]", Style::new().fg(theme::ACCENT()).bold()),
+            Span::styled(" close", Style::new().fg(theme::MUTED())),
+        ]));
+
+        frame.render_widget(Paragraph::new(lines), inner);
     }
 
     fn draw_submit_modal(&self, frame: &mut Frame, area: Rect) {
@@ -602,15 +673,15 @@ impl Helper {
 
         frame.render_widget(Clear, popup);
         let border = block(Some(&format!(" Submit to {} ", info.platform)))
-            .border_style(theme::ACCENT)
-            .title_style(Style::new().fg(theme::ACCENT).bold())
+            .border_style(theme::ACCENT())
+            .title_style(Style::new().fg(theme::ACCENT()).bold())
             .title_alignment(Alignment::Center);
         let inner = border.inner(popup);
         frame.render_widget(border, popup);
 
         let row = |label: &str, value: String, color: Color| -> Line<'static> {
             Line::from(vec![
-                Span::styled(format!("  {label:<12}"), Style::new().fg(theme::MUTED)),
+                Span::styled(format!("  {label:<12}"), Style::new().fg(theme::MUTED())),
                 Span::styled(value, Style::new().fg(color)),
             ])
         };
@@ -626,36 +697,36 @@ impl Helper {
             format!("{} — not installed!", info.browser)
         };
         let rows: Vec<Line> = vec![
-            row("Problem", problem_name, theme::TEXT),
-            row("File", info.file_name.clone(), theme::CYAN),
-            row("Platform", info.platform.to_string(), theme::YELLOW),
-            row("Problem ID", info.problem_code.clone(), theme::ORANGE),
-            row("Submit URL", info.submit_url.clone(), theme::ACCENT),
+            row("Problem", problem_name, theme::TEXT()),
+            row("File", info.file_name.clone(), theme::TEXT()),
+            row("Platform", info.platform.to_string(), theme::TEXT()),
+            row("Problem ID", info.problem_code.clone(), theme::TEXT()),
+            row("Submit URL", info.submit_url.clone(), theme::TEXT()),
             row(
                 "Language",
                 format!("{}  (id {})", info.language, info.language_id),
-                theme::TEXT,
+                theme::TEXT(),
             ),
             row(
                 "Browser",
                 browser,
                 if info.safari_available {
-                    theme::PURPLE
+                    theme::TEXT()
                 } else {
-                    theme::RED
+                    theme::RED()
                 },
             ),
             row(
                 "Local tests",
                 format!("{} cases · TL {}ms", pending.test_count, pending.time_limit),
-                theme::MUTED,
+                theme::MUTED(),
             ),
             Line::from(""),
             Line::from(vec![
-                Span::styled("  [Enter]", Style::new().fg(theme::GREEN).bold()),
-                Span::styled(" submit      ", Style::new().fg(theme::MUTED)),
-                Span::styled("[Backspace]", Style::new().fg(theme::RED).bold()),
-                Span::styled(" cancel", Style::new().fg(theme::MUTED)),
+                Span::styled("  [Enter]", Style::new().fg(theme::GREEN()).bold()),
+                Span::styled(" submit      ", Style::new().fg(theme::MUTED())),
+                Span::styled("[Backspace]", Style::new().fg(theme::RED()).bold()),
+                Span::styled(" cancel", Style::new().fg(theme::MUTED())),
             ]),
         ];
 
@@ -681,8 +752,8 @@ impl Helper {
 
         frame.render_widget(Clear, popup);
         let border = block(Some(" Delete TestCase "))
-            .border_style(theme::RED)
-            .title_style(Style::new().fg(theme::RED).bold())
+            .border_style(theme::RED())
+            .title_style(Style::new().fg(theme::RED()).bold())
             .title_alignment(Alignment::Center);
         let inner = border.inner(popup);
         frame.render_widget(border, popup);
@@ -703,28 +774,28 @@ impl Helper {
         let expected = preview(&tc.exp_content.lines().join("\n"));
         let rows: Vec<Line> = vec![
             Line::from(vec![
-                Span::styled("  Delete ", Style::new().fg(theme::MUTED)),
+                Span::styled("  Delete ", Style::new().fg(theme::MUTED())),
                 Span::styled(
                     format!("case {} of {}", self.tc_list.active_area + 1, total),
-                    Style::new().fg(theme::RED).bold(),
+                    Style::new().fg(theme::RED()).bold(),
                 ),
-                Span::styled(" for good?", Style::new().fg(theme::MUTED)),
+                Span::styled(" for good?", Style::new().fg(theme::MUTED())),
             ]),
             Line::from(""),
             Line::from(vec![
-                Span::styled("  input     ", Style::new().fg(theme::MUTED)),
-                Span::styled(input, Style::new().fg(theme::CYAN)),
+                Span::styled("  input     ", Style::new().fg(theme::MUTED())),
+                Span::styled(input, Style::new().fg(theme::TEXT())),
             ]),
             Line::from(vec![
-                Span::styled("  expected  ", Style::new().fg(theme::MUTED)),
-                Span::styled(expected, Style::new().fg(theme::TEXT)),
+                Span::styled("  expected  ", Style::new().fg(theme::MUTED())),
+                Span::styled(expected, Style::new().fg(theme::TEXT())),
             ]),
             Line::from(""),
             Line::from(vec![
-                Span::styled("  [Enter]", Style::new().fg(theme::RED).bold()),
-                Span::styled(" delete      ", Style::new().fg(theme::MUTED)),
-                Span::styled("[Backspace]", Style::new().fg(theme::GREEN).bold()),
-                Span::styled(" back", Style::new().fg(theme::MUTED)),
+                Span::styled("  [Enter]", Style::new().fg(theme::RED()).bold()),
+                Span::styled(" delete      ", Style::new().fg(theme::MUTED())),
+                Span::styled("[Backspace]", Style::new().fg(theme::GREEN()).bold()),
+                Span::styled(" back", Style::new().fg(theme::MUTED())),
             ]),
         ];
 
@@ -784,7 +855,7 @@ impl Helper {
         self.dir_terminal.clear_result();
         self.dir_terminal.clear_error();
         self.dir_terminal.set_live(
-            theme::CYAN,
+            theme::CYAN(),
             if smoke {
                 "no stored cases — smoke-running with empty input & expected output".to_string()
             } else {
@@ -817,7 +888,7 @@ impl Helper {
         } else if message.starts_with("sources unchanged") {
             self.last_compile = Some("compile skipped".to_string());
         }
-        self.dir_terminal.set_live(theme::CYAN, message);
+        self.dir_terminal.set_live(theme::CYAN(), message);
     }
 
     fn cancel_run(&mut self) {
@@ -826,7 +897,7 @@ impl Helper {
             && let Some(started) = self.run_started.take()
         {
             self.dir_terminal.set_result(
-                theme::YELLOW,
+                theme::YELLOW(),
                 format!("run cancelled after {}ms", started.elapsed().as_millis()),
             );
         }
@@ -839,7 +910,7 @@ impl Helper {
     pub fn cmd_add(&mut self) -> bool {
         if self.active_problem.is_none() {
             self.dir_terminal.set_error(
-                theme::RED,
+                theme::RED(),
                 "no active problem — receive one to add custom cases",
             );
             return false;
@@ -847,6 +918,7 @@ impl Helper {
         // Editing mutates cases the runner may still be writing to — retire the run.
         self.cancel_run();
         self.input_mode = InputMode::Editing;
+        self.adding_case = true;
         self.tc_list.add_tc();
         self.expand_all_cases();
         self.sync_problem_tests();
@@ -855,11 +927,12 @@ impl Helper {
 
     pub fn cmd_edit(&mut self) -> bool {
         if self.active_problem.is_none() || self.tc_list.testcases.is_empty() {
-            self.dir_terminal.set_error(theme::RED, "nothing to edit");
+            self.dir_terminal.set_error(theme::RED(), "nothing to edit");
             return false;
         }
         self.cancel_run();
         self.input_mode = InputMode::Editing;
+        self.adding_case = false;
         self.tc_list.focus_first();
         self.expand_all_cases();
         true
@@ -870,7 +943,7 @@ impl Helper {
     pub fn cmd_delete(&mut self) {
         if self.tc_list.testcases.is_empty() {
             self.dir_terminal
-                .set_error(theme::RED, "no test case to delete");
+                .set_error(theme::RED(), "no test case to delete");
             return;
         }
         // A stale run must not write verdicts into a list that is about to shift.
@@ -912,7 +985,7 @@ impl Helper {
         self.input_mode = InputMode::Normal;
         if self.sync_problem_tests() {
             self.dir_terminal.set_result(
-                theme::TEXT,
+                theme::TEXT(),
                 format!(
                     "deleted case {} · {} left",
                     index + 1,
@@ -934,7 +1007,7 @@ impl Helper {
     pub fn cmd_submit(&mut self) -> Option<PassingCommand> {
         let Some(problem) = &self.active_problem else {
             self.dir_terminal
-                .set_error(theme::RED, "no active problem to submit");
+                .set_error(theme::RED(), "no active problem to submit");
             return None;
         };
 
@@ -958,7 +1031,7 @@ impl Helper {
             }
             Err(e) => {
                 self.dir_terminal
-                    .set_error(theme::RED, format!("cannot submit: {e}"));
+                    .set_error(theme::RED(), format!("cannot submit: {e}"));
             }
         }
         None
@@ -1039,7 +1112,7 @@ impl Helper {
 
         if let Err(e) = self.fs_ops.save_tc_file(&problem) {
             self.dir_terminal
-                .set_error(theme::RED, format!("failed to save test cases: {e}"));
+                .set_error(theme::RED(), format!("failed to save test cases: {e}"));
         }
 
         let code_path = self.fs_ops.write_code_file(&problem, &code_dir);
@@ -1063,14 +1136,14 @@ impl Helper {
 
         self.attach_problem(problem);
         self.input_mode = InputMode::Normal;
-        self.dir_terminal.set_result(theme::TEXT, summary);
+        self.dir_terminal.set_result(theme::TEXT(), summary);
         Some(code_path)
     }
 
     fn set_active_from_file(&mut self, file: &Path) -> Result<(), String> {
         if !file.exists() {
             let message = format!("file not found: {}", file.display());
-            self.dir_terminal.set_error(theme::RED, message.clone());
+            self.dir_terminal.set_error(theme::RED(), message.clone());
             return Err(message);
         }
 
@@ -1107,6 +1180,7 @@ impl Helper {
                 .push(TestCase::new(&tc.input, &tc.expected_output));
         }
         self.active_problem = Some(problem);
+        self.adding_case = false;
         self.cancel_run();
         self.dirty = true;
     }
@@ -1194,7 +1268,7 @@ impl Helper {
         let total = self.tc_list.testcases.len();
         if total == 0 {
             self.dir_terminal
-                .set_result(theme::YELLOW, "no test cases to run");
+                .set_result(theme::YELLOW(), "no test cases to run");
             return;
         }
 
@@ -1242,9 +1316,9 @@ impl Helper {
 
         self.dir_terminal.set_result(
             if failed == 0 {
-                theme::GREEN
+                theme::GREEN()
             } else {
-                theme::RED
+                theme::RED()
             },
             message,
         );
@@ -1264,14 +1338,14 @@ impl Helper {
     pub fn submit_status(&mut self, id: u64, message: String) {
         if let Some(submission) = self.submissions.iter_mut().find(|s| s.id == id) {
             submission.message = message;
-            submission.color = theme::PURPLE;
+            submission.color = theme::PURPLE();
         }
     }
 
     pub fn submit_finished(&mut self, id: u64, result: String) {
         let color = match submitter::classify(&result) {
-            submitter::Outcome::Accepted => theme::GREEN,
-            submitter::Outcome::Rejected | submitter::Outcome::Failed => theme::RED,
+            submitter::Outcome::Accepted => theme::GREEN(),
+            submitter::Outcome::Rejected | submitter::Outcome::Failed => theme::RED(),
         };
         if let Some(submission) = self.submissions.iter_mut().find(|s| s.id == id) {
             submission.message = result;
@@ -1281,7 +1355,7 @@ impl Helper {
     }
 
     pub fn set_error(&mut self, message: String) {
-        self.dir_terminal.set_error(theme::RED, message);
+        self.dir_terminal.set_error(theme::RED(), message);
     }
 
     // ------------------------------------------------------------------
@@ -1290,6 +1364,7 @@ impl Helper {
 
     fn finish_editing(&mut self) {
         self.input_mode = InputMode::Normal;
+        self.adding_case = false;
 
         // Drop a trailing case that was added but left completely empty.
         if self.tc_list.testcases.len() > 1
@@ -1303,7 +1378,7 @@ impl Helper {
         self.dir_terminal.clear_hint();
         if self.sync_problem_tests() {
             self.dir_terminal
-                .set_result(theme::TEXT, "test cases saved");
+                .set_result(theme::TEXT(), "test cases saved");
         }
     }
 
@@ -1323,7 +1398,7 @@ impl Helper {
         let snapshot = problem.clone();
         if let Err(e) = self.fs_ops.save_tc_file(&snapshot) {
             self.dir_terminal
-                .set_error(theme::RED, format!("failed to save: {e}"));
+                .set_error(theme::RED(), format!("failed to save: {e}"));
             return false;
         }
         true
@@ -1334,12 +1409,12 @@ impl Helper {
             return;
         };
         let (label, color) = match pane {
-            PaneKind::Input => ("Input", theme::CYAN),
-            PaneKind::Expected => ("Expected", theme::TEXT),
+            PaneKind::Input => ("Input", theme::CYAN()),
+            PaneKind::Expected => ("Expected", theme::TEXT()),
             PaneKind::Got => (
                 "Got",
                 if matches!(tc.verdict, CaseVerdict::Pending) {
-                    theme::MUTED
+                    theme::MUTED()
                 } else {
                     tc.verdict.color()
                 },
@@ -1591,17 +1666,26 @@ impl Helper {
 
         let content_width = dialog.content.max_width();
         let initial_content_height = inner.height.saturating_sub(hint_height);
+        let scrollbar_rows: u16 = 2; // one row of gap + the one-cell scrollbar
+        let scrollbar_columns: u16 = 2; // one column of gap + the one-cell scrollbar
         let initial_vscroll = total_lines > initial_content_height as usize;
-        let initial_usable_width = inner.width.saturating_sub(u16::from(initial_vscroll));
+        let initial_usable_width = inner
+            .width
+            .saturating_sub(u16::from(initial_vscroll) * scrollbar_columns);
         let mut hscroll = content_width > initial_usable_width as usize;
-        let mut content_height = initial_content_height.saturating_sub(u16::from(hscroll));
+        let mut content_height = initial_content_height
+            .saturating_sub(u16::from(hscroll) * scrollbar_rows);
         let mut vscroll = total_lines > content_height as usize;
-        let mut usable_width = inner.width.saturating_sub(u16::from(vscroll));
+        let mut usable_width = inner
+            .width
+            .saturating_sub(u16::from(vscroll) * scrollbar_columns);
         if !hscroll && content_width > usable_width as usize {
             hscroll = true;
-            content_height = initial_content_height.saturating_sub(1);
+            content_height = initial_content_height.saturating_sub(scrollbar_rows);
             vscroll = total_lines > content_height as usize;
-            usable_width = inner.width.saturating_sub(u16::from(vscroll));
+            usable_width = inner
+                .width
+                .saturating_sub(u16::from(vscroll) * scrollbar_columns);
         }
         dialog.viewport = content_height.max(1);
         dialog.viewport_width = usable_width.max(1);
@@ -1639,6 +1723,7 @@ impl Helper {
         };
 
         let content_area = Rect {
+            width: usable_width,
             height: content_height,
             ..inner
         };
@@ -1654,11 +1739,6 @@ impl Helper {
         if total_lines > dialog.viewport as usize {
             let mut state =
                 ScrollbarState::new(total_lines - dialog.viewport as usize).position(dialog.scroll);
-            let scrollbar = Scrollbar::new(ratatui::widgets::ScrollbarOrientation::VerticalRight)
-                .style(theme::MUTED)
-                .track_style(theme::BORDER)
-                .begin_symbol(Some("-"))
-                .end_symbol(Some("-"));
             let scroll_area = Rect {
                 x: inner.x + inner.width.saturating_sub(1),
                 y: content_area.y,
@@ -1666,7 +1746,11 @@ impl Helper {
                 height: content_height,
             };
             dialog.v_scroll_area = scroll_area;
-            frame.render_stateful_widget(scrollbar, scroll_area, &mut state);
+            frame.render_stateful_widget(
+                scrollbar(ScrollbarOrientation::VerticalRight),
+                scroll_area,
+                &mut state,
+            );
         } else {
             dialog.v_scroll_drag = None;
         }
@@ -1675,33 +1759,31 @@ impl Helper {
         if hscroll {
             let max_h_scroll = content_width.saturating_sub(usable_width as usize);
             let mut state = ScrollbarState::new(max_h_scroll).position(dialog.h_scroll);
-            let scrollbar =
-                Scrollbar::new(ratatui::widgets::ScrollbarOrientation::HorizontalBottom)
-                    .style(theme::MUTED)
-                    .track_style(theme::BORDER)
-                    .begin_symbol(Some("|"))
-                    .end_symbol(Some("|"));
             let scroll_area = Rect {
                 x: inner.x,
-                y: inner.y + content_height,
+                y: inner.y + content_height + 1,
                 width: usable_width,
                 height: 1,
             };
             dialog.h_scroll_area = scroll_area;
-            frame.render_stateful_widget(scrollbar, scroll_area, &mut state);
+            frame.render_stateful_widget(
+                scrollbar(ScrollbarOrientation::HorizontalBottom),
+                scroll_area,
+                &mut state,
+            );
         } else {
             dialog.h_scroll_drag = None;
         }
 
         if hint_height > 0 {
             let hint = Paragraph::new(Line::from(vec![
-                Span::styled("Esc", Style::new().fg(theme::ACCENT).bold()),
-                Span::styled(" close   ", Style::new().fg(theme::MUTED)),
-                Span::styled("↑/↓", Style::new().fg(theme::ACCENT).bold()),
-                Span::styled(" scroll   ", Style::new().fg(theme::MUTED)),
-                Span::styled("←/→", Style::new().fg(theme::ACCENT).bold()),
-                Span::styled(" pan   ", Style::new().fg(theme::MUTED)),
-                Span::styled("PgUp/PgDn", Style::new().fg(theme::ACCENT).bold()),
+                Span::styled("Esc", Style::new().fg(theme::ACCENT()).bold()),
+                Span::styled(" close   ", Style::new().fg(theme::MUTED())),
+                Span::styled("↑/↓", Style::new().fg(theme::ACCENT()).bold()),
+                Span::styled(" scroll   ", Style::new().fg(theme::MUTED())),
+                Span::styled("←/→", Style::new().fg(theme::ACCENT()).bold()),
+                Span::styled(" pan   ", Style::new().fg(theme::MUTED())),
+                Span::styled("PgUp/PgDn", Style::new().fg(theme::ACCENT()).bold()),
             ]))
             .alignment(Alignment::Center);
             frame.render_widget(
@@ -1725,6 +1807,23 @@ impl Helper {
             self.handle_pane_dialog_event(event);
             return None;
         }
+        if self.show_help {
+            if let Event::Key(key) = &event
+                && matches!(
+                    key.code,
+                    KeyCode::Char('h') | KeyCode::F(1) | KeyCode::Esc
+                )
+            {
+                self.show_help = false;
+            }
+            return None;
+        }
+        if let Event::Key(key) = &event
+            && key.code == KeyCode::F(1)
+        {
+            self.show_help = true;
+            return None;
+        }
         match event {
             Event::Key(key) => match self.input_mode {
                 InputMode::Editing => {
@@ -1732,7 +1831,8 @@ impl Helper {
                         self.finish_editing();
                         return None;
                     }
-                    self.tc_list.handle_key(Event::Key(key));
+                    self.tc_list
+                        .handle_key(Event::Key(key), self.adding_case);
                     self.tc_list.update_scroll();
                 }
                 InputMode::Normal => match key.code {
@@ -1755,6 +1855,7 @@ impl Helper {
                         self.config_menu = ConfigMenu::new(&config);
                         self.input_mode = InputMode::Config;
                     }
+                    KeyCode::Char('h') => self.show_help = true,
                     _ => {}
                 },
                 InputMode::DeleteSelect => match key.code {
@@ -1768,8 +1869,9 @@ impl Helper {
                     }
                     KeyCode::Esc => {
                         self.input_mode = InputMode::Normal;
-                        self.dir_terminal.set_hint(theme::MUTED, "delete cancelled");
+                        self.dir_terminal.set_hint(theme::MUTED(), "delete cancelled");
                     }
+                    KeyCode::Char('h') => self.show_help = true,
                     _ => {}
                 },
                 InputMode::ConfirmDelete => match key.code {
@@ -1777,6 +1879,7 @@ impl Helper {
                     KeyCode::Backspace | KeyCode::Esc => {
                         self.input_mode = InputMode::DeleteSelect;
                     }
+                    KeyCode::Char('h') => self.show_help = true,
                     _ => {}
                 },
                 InputMode::Directory => {
@@ -1791,12 +1894,12 @@ impl Helper {
                         self.input_mode = InputMode::Normal;
                         if saved {
                             self.dir_terminal.set_result(
-                                theme::GREEN,
+                                theme::GREEN(),
                                 format!("config saved · language {}", config.language.label()),
                             );
                         } else {
                             self.dir_terminal
-                                .set_error(theme::RED, "failed to save config");
+                                .set_error(theme::RED(), "failed to save config");
                         }
                     }
                 }
@@ -1820,7 +1923,7 @@ impl Helper {
                                     pending.info.problem_code,
                                     pending.info.language
                                 ),
-                                color: theme::MUTED,
+                                color: theme::MUTED(),
                                 done: false,
                             });
                             self.submission_scroll = 0;
@@ -1838,8 +1941,9 @@ impl Helper {
                         self.pending_submit = None;
                         self.input_mode = InputMode::Normal;
                         self.dir_terminal
-                            .set_hint(theme::MUTED, "submission cancelled");
+                            .set_hint(theme::MUTED(), "submission cancelled");
                     }
+                    KeyCode::Char('h') => self.show_help = true,
                     _ => {}
                 },
             },
@@ -1919,6 +2023,17 @@ impl Helper {
         }
         None
     }
+}
+
+fn draw_hairline(frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let rule = "─".repeat(area.width as usize);
+    frame.render_widget(
+        Paragraph::new(Span::styled(rule, Style::new().fg(theme::BORDER()))),
+        area,
+    );
 }
 
 fn dim_area(frame: &mut Frame, area: Rect) {
@@ -2239,6 +2354,70 @@ mod tests {
     }
 
     #[test]
+    fn adding_a_case_keeps_tab_inside_that_case() {
+        let root = temp_root("add_stay");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        helper.new_problem(sample_problem());
+        helper.handle_event(key(KeyCode::Char('a')));
+        let new_case = helper.tc_list.active_area;
+        assert_eq!(new_case, 2);
+        assert_eq!(
+            helper.tc_list.active_box,
+            crate::components::testcase::ActiveBox::Input
+        );
+
+        helper.handle_event(key(KeyCode::Tab));
+        assert_eq!(helper.tc_list.active_area, new_case);
+        assert_eq!(
+            helper.tc_list.active_box,
+            crate::components::testcase::ActiveBox::Expected
+        );
+
+        helper.handle_event(key(KeyCode::Tab));
+        assert_eq!(helper.tc_list.active_area, new_case);
+        assert_eq!(
+            helper.tc_list.active_box,
+            crate::components::testcase::ActiveBox::Input
+        );
+
+        helper.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::BackTab,
+            KeyModifiers::SHIFT,
+        )));
+        assert_eq!(helper.tc_list.active_area, new_case);
+        assert_eq!(
+            helper.tc_list.active_box,
+            crate::components::testcase::ActiveBox::Expected
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn edit_mode_still_walks_cases() {
+        let root = temp_root("edit_walk");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        helper.new_problem(sample_problem());
+        helper.handle_event(key(KeyCode::Char('e')));
+        assert_eq!(helper.tc_list.active_area, 0);
+
+        helper.handle_event(key(KeyCode::Tab));
+        assert_eq!(helper.tc_list.active_area, 0);
+        helper.handle_event(key(KeyCode::Tab));
+        assert_eq!(helper.tc_list.active_area, 1);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn delete_selects_and_asks_for_confirmation() {
         let root = temp_root("delete");
         let fs_ops = FsOps::with_root(root.clone());
@@ -2349,6 +2528,7 @@ mod tests {
         type_text(&mut helper, "-O2");
         helper.handle_event(key(KeyCode::Enter));
         helper.handle_event(key(KeyCode::Tab));
+        helper.handle_event(key(KeyCode::Tab));
         helper.handle_event(key(KeyCode::Right));
         assert_eq!(helper.config_menu.language, Language::Python);
         assert!(helper.config_menu.flags.is_empty());
@@ -2423,10 +2603,10 @@ mod tests {
 
         helper.submit_status(1, "judging on Codeforces…".into());
         assert_eq!(helper.submissions[0].message, "judging on Codeforces…");
-        assert_eq!(helper.submissions[0].color, theme::PURPLE);
+        assert_eq!(helper.submissions[0].color, theme::PURPLE());
         helper.submit_finished(1, "RESULT: ACCEPTED".into());
         assert!(helper.submissions[0].done);
-        assert_eq!(helper.submissions[0].color, theme::GREEN);
+        assert_eq!(helper.submissions[0].color, theme::GREEN());
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2457,7 +2637,7 @@ mod tests {
 
         helper.submit_status(2, "judging…".into());
         assert_eq!(helper.submissions[1].message, "judging…");
-        assert_eq!(helper.submissions[0].color, theme::MUTED);
+        assert_eq!(helper.submissions[0].color, theme::MUTED());
 
         helper.submit_finished(1, "RESULT: ACCEPTED".into());
         assert!(helper.submissions[0].done && !helper.submissions[1].done);
@@ -2499,12 +2679,12 @@ mod tests {
         let buffer = terminal.backend().buffer();
         assert_eq!(
             buffer[(0, 0)].fg,
-            theme::MUTED,
+            theme::MUTED(),
             "the master border stays muted"
         );
         assert_eq!(
             buffer[(2, 1)].fg,
-            theme::ACCENT,
+            theme::ACCENT(),
             "the active command bar is focused in accent blue"
         );
         assert_eq!(
@@ -2528,8 +2708,8 @@ mod tests {
     }
 
     #[test]
-    fn footer_keeps_key_descriptions_and_original_badges() {
-        let root = temp_root("footer_descriptions");
+    fn footer_shows_the_mode_and_keys_only() {
+        let root = temp_root("footer_keys");
         let fs_ops = FsOps::with_root(root.clone());
         let work = root.join("problems");
         std::fs::create_dir_all(&work).unwrap();
@@ -2542,13 +2722,19 @@ mod tests {
         let footer = (0..buffer.area.width)
             .map(|x| buffer[(x, buffer.area.height - 2)].symbol())
             .collect::<String>();
+        assert!(footer.contains("NORMAL"), "normal mode has a badge: {footer}");
+        assert!(footer.contains("[a]") && footer.contains("[q]"), "{footer}");
+        assert!(footer.contains("[h]"), "the help key is visible: {footer}");
         assert!(
-            footer.contains("[a] add case") && footer.contains("[q] quit"),
-            "every key keeps its description: {footer}"
+            !footer.contains("add case") && !footer.contains("quit"),
+            "the footer keeps only key strokes: {footer}"
         );
-        assert!(
-            !footer.contains("NORMAL"),
-            "normal mode has no badge in the original UI: {footer}"
+        let x = footer.find("NORMAL").unwrap() as u16;
+        assert_eq!(buffer[(x, buffer.area.height - 2)].fg, Color::Black);
+        assert_eq!(
+            buffer[(x, buffer.area.height - 2)].bg,
+            theme::ACCENT(),
+            "the mode badge stays filled"
         );
 
         helper.handle_event(key(KeyCode::Char('d')));
@@ -2561,9 +2747,100 @@ mod tests {
         assert_eq!(buffer[(x, buffer.area.height - 2)].fg, Color::Black);
         assert_eq!(
             buffer[(x, buffer.area.height - 2)].bg,
-            theme::CYAN,
-            "mode labels are filled badges in the original UI"
+            theme::CYAN(),
+            "mode labels are filled badges"
         );
+        assert!(!footer.contains("cd <path>"), "{footer}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn footer_keys_fit_at_eighty_columns() {
+        let root = temp_root("footer_80");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let footer = (0..buffer.area.width)
+            .map(|x| buffer[(x, buffer.area.height - 2)].symbol())
+            .collect::<String>();
+        assert!(footer.contains("NORMAL"), "{footer}");
+        assert!(footer.contains("[q]"), "{footer}");
+        assert!(footer.contains("[h]"), "{footer}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn h_opens_and_closes_help() {
+        let root = temp_root("footer_help");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        helper.handle_event(key(KeyCode::Char('h')));
+        assert!(helper.show_help);
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        dump_screen(&terminal);
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("Keys"), "{screen}");
+        assert!(screen.contains("add case"), "{screen}");
+        assert!(screen.contains("NORMAL"), "the footer keeps the mode: {screen}");
+
+        helper.handle_event(key(KeyCode::Char('h')));
+        assert!(!helper.show_help);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn f1_opens_help_while_editing_a_new_case() {
+        let root = temp_root("footer_help_editing");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        helper.new_problem(sample_problem());
+        helper.handle_event(key(KeyCode::Char('a')));
+        assert!(matches!(helper.input_mode, InputMode::Editing));
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        helper.handle_event(key(KeyCode::F(1)));
+        assert!(helper.show_help);
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        dump_screen(&terminal);
+        let buffer = terminal.backend().buffer();
+        let screen = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("switch input / expected"), "{screen}");
+        assert!(screen.contains("[Tab] [⇧Tab]"), "{screen}");
+        assert!(screen.contains("[F1]"), "the close hint names F1: {screen}");
+        assert!(screen.contains("EDITING"), "the footer keeps the mode: {screen}");
+
+        helper.handle_event(key(KeyCode::F(1)));
+        assert!(!helper.show_help);
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2591,6 +2868,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(screen.contains("EDITING"), "the footer still shows the mode");
+        assert!(
+            !screen.contains("[F1]") && !screen.contains("[h]"),
+            "help stays on the normal footer only:\n{screen}"
+        );
         assert!(
             !screen.contains("switch field"),
             "the console must not repeat footer key hints:\n{screen}"
@@ -2621,7 +2902,7 @@ mod tests {
             "the console owns the run status: {footer}"
         );
         assert!(
-            footer.contains("[r] run"),
+            footer.contains("[r]"),
             "the key hints stay visible: {footer}"
         );
 
@@ -2646,7 +2927,7 @@ mod tests {
             .collect::<String>();
         assert!(header.contains("ZCH"), "the brand chip is back: {header}");
         let brand_x = header.find('Z').unwrap() as u16;
-        assert_eq!(buffer[(brand_x, 0)].fg, theme::ACCENT);
+        assert_eq!(buffer[(brand_x, 0)].fg, theme::ACCENT());
 
         let row = (0..buffer.area.width)
             .map(|x| buffer[(x, 1)].symbol())
@@ -2658,7 +2939,7 @@ mod tests {
             title_x > buffer.area.width / 2,
             "the directory title sits on the right: {row}"
         );
-        assert_eq!(buffer[(title_x, 1)].fg, theme::CYAN);
+        assert_eq!(buffer[(title_x, 1)].fg, theme::MUTED());
         assert_eq!(
             buffer[(3, 2)].bg,
             Color::Reset,
@@ -2675,7 +2956,7 @@ mod tests {
             !row.contains("Working Directory"),
             "the active command bar shows the path prompt instead: {row}"
         );
-        assert_eq!(buffer[(2, 1)].fg, theme::ACCENT);
+        assert_eq!(buffer[(2, 1)].fg, theme::ACCENT());
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2696,7 +2977,7 @@ mod tests {
         terminal.draw(|f| helper.draw(f)).unwrap();
         let buffer = terminal.backend().buffer();
 
-        assert_eq!(buffer[(0, 0)].fg, theme::MUTED);
+        assert_eq!(buffer[(0, 0)].fg, theme::MUTED());
         assert_eq!(
             buffer[(3, 2)].bg,
             Color::Reset,
@@ -2704,7 +2985,7 @@ mod tests {
         );
 
         let submissions = helper.submissions_area;
-        assert_eq!(buffer[(submissions.x, submissions.y)].fg, theme::BORDER);
+        assert_eq!(buffer[(submissions.x, submissions.y)].fg, theme::BORDER());
         assert_eq!(
             buffer[(submissions.x + 1, submissions.y + 1)].bg,
             Color::Reset,
@@ -2714,7 +2995,7 @@ mod tests {
         let console_height = helper.dir_terminal.console_height(buffer.area.width - 2);
         assert!(console_height > 0);
         let console_y = buffer.area.height - 2 - console_height;
-        assert_eq!(buffer[(2, console_y)].fg, theme::BORDER);
+        assert_eq!(buffer[(2, console_y)].fg, theme::PURPLE());
         assert_eq!(
             buffer[(3, console_y + 1)].bg,
             Color::Reset,
@@ -2725,6 +3006,37 @@ mod tests {
             Color::Reset,
             "the footer must not have a filled background"
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn hairline_separates_the_list_from_the_header_and_the_console() {
+        let root = temp_root("chrome_hairline");
+        let fs_ops = FsOps::with_root(root.clone());
+        let work = root.join("problems");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let mut helper = Helper::new(work, &fs_ops);
+        helper.new_problem(sample_problem());
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = |y| {
+            (2..buffer.area.width - 2)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        };
+        // Master border, then the 3-row directory box, then the hairline.
+        assert!(row(4).chars().all(|c| c == '─'), "top rule: {}", row(4));
+        let console_height = helper.dir_terminal.console_height(buffer.area.width);
+        let bottom_rule = buffer.area.height - 2 - console_height - 1;
+        assert!(
+            row(bottom_rule).chars().all(|c| c == '─'),
+            "bottom rule: {}",
+            row(bottom_rule)
+        );
+        assert!(!row(5).contains("↑ more"), "the hairline replaces the marker");
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2744,7 +3056,7 @@ mod tests {
         assert_eq!(helper.tc_list.testcases[0].area.rect.x, 2);
         assert_eq!(
             helper.tc_list.testcases[0].area.rect.y, 5,
-            "the list leaves a blank row under the directory bar"
+            "the first case sits on the row under the hairline"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -3366,6 +3678,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
         terminal.draw(|f| helper.draw(f)).unwrap();
+        dump_screen(&terminal);
         let screen = |terminal: &Terminal<TestBackend>| {
             let buffer = terminal.backend().buffer();
             (0..buffer.area.height)
@@ -3395,6 +3708,14 @@ mod tests {
 
         let area = helper.pane_dialog.as_ref().unwrap().h_scroll_area;
         assert!(area.width > 1, "the horizontal scrollbar must be hittable");
+        let buffer = terminal.backend().buffer();
+        let gap_row = (0..area.width)
+            .map(|x| buffer[(area.x + x, area.y - 1)].symbol())
+            .collect::<String>();
+        assert!(
+            gap_row.chars().all(|c| c == ' '),
+            "the horizontal scrollbar keeps a blank row above it: {gap_row:?}"
+        );
         let mouse = |kind, column, row| {
             Event::Mouse(MouseEvent {
                 kind,
@@ -3461,11 +3782,20 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|f| helper.draw(f)).unwrap();
+        dump_screen(&terminal);
         let area = helper.pane_dialog.as_ref().unwrap().v_scroll_area;
         assert!(
             area.height > 2,
             "the pane dialog must expose a vertical scrollbar"
         );
+        let buffer = terminal.backend().buffer();
+        for row in area.y..area.y + area.height {
+            assert_eq!(
+                buffer[(area.x - 1, row)].symbol(),
+                " ",
+                "the vertical scrollbar keeps a blank column beside it"
+            );
+        }
 
         let mouse = |kind, column, row| {
             Event::Mouse(MouseEvent {
@@ -3578,7 +3908,7 @@ mod tests {
             dialog.visible_lines()[0]
                 .spans
                 .iter()
-                .any(|span| span.style.fg == Some(theme::RED)),
+                .any(|span| span.style.fg == Some(theme::RED())),
             "paged WA output still gets its diff"
         );
 
@@ -3647,7 +3977,7 @@ mod tests {
                 .visible_lines()
                 .iter()
                 .flat_map(|line| &line.spans)
-                .any(|span| span.style.fg == Some(theme::RED)),
+                .any(|span| span.style.fg == Some(theme::RED())),
             "safe WA output keeps its red diff in the dialog"
         );
         assert!(

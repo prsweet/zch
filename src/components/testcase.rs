@@ -10,12 +10,12 @@ use ratatui::{
     crossterm::event::{MouseButton, MouseEvent, MouseEventKind},
     layout::{
         Constraint::{Length, Percentage},
-        HorizontalAlignment::{Left, Right},
+        HorizontalAlignment::Right,
         Layout, Rect,
     },
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{BorderType, Borders, Padding, Paragraph, Widget},
+    widgets::{Paragraph, Widget},
 };
 use ratatui_textarea::TextArea;
 
@@ -57,12 +57,12 @@ pub enum CaseVerdict {
 impl CaseVerdict {
     pub fn color(&self) -> Color {
         match self {
-            CaseVerdict::Pending => theme::MUTED,
-            CaseVerdict::AC { .. } => theme::GREEN,
-            CaseVerdict::WA { .. } => theme::RED,
-            CaseVerdict::Tle => theme::YELLOW,
-            CaseVerdict::RE => theme::PURPLE,
-            CaseVerdict::CE => theme::ORANGE,
+            CaseVerdict::Pending => theme::MUTED(),
+            CaseVerdict::AC { .. } => theme::GREEN(),
+            CaseVerdict::WA { .. } => theme::RED(),
+            CaseVerdict::Tle => theme::YELLOW(),
+            CaseVerdict::RE => theme::RED(),
+            CaseVerdict::CE => theme::ORANGE(),
         }
     }
 
@@ -489,7 +489,7 @@ impl TestCase {
                         .unwrap_or_default()
                 } else {
                     let style = if matches!(self.verdict, CaseVerdict::CE | CaseVerdict::RE) {
-                        Style::new().fg(theme::RED)
+                        Style::new().fg(theme::RED())
                     } else {
                         Style::new()
                     };
@@ -498,7 +498,7 @@ impl TestCase {
                 if line.truncated {
                     rendered
                         .spans
-                        .push(Span::styled("…", Style::new().fg(theme::MUTED).italic()));
+                        .push(Span::styled("…", Style::new().fg(theme::MUTED()).italic()));
                 }
                 rendered
             })
@@ -553,7 +553,7 @@ impl TestCase {
             highlight_got_full(&self.expected_text(), stdout)
         } else {
             let style = if matches!(self.verdict, CaseVerdict::CE | CaseVerdict::RE) {
-                Style::new().fg(theme::RED)
+                Style::new().fg(theme::RED())
             } else {
                 Style::new()
             };
@@ -590,39 +590,60 @@ impl TestCase {
 
         let verdict_color = self.verdict.color();
         let verdict_border = if matches!(self.verdict, CaseVerdict::Pending) {
-            theme::BORDER
+            theme::BORDER()
         } else {
             verdict_color
         };
         let toggle = if self.collapsed { "▶" } else { "▼" };
-        let (title_color, border_color) = match focus {
-            CaseFocus::Edit => (theme::ACCENT, theme::BORDER),
-            CaseFocus::Delete => (theme::RED, theme::RED),
-            CaseFocus::None => (Color::Reset, theme::BORDER),
+        let title_color = match focus {
+            CaseFocus::Edit => theme::ACCENT(),
+            CaseFocus::Delete => theme::TEXT(),
+            CaseFocus::None => theme::TEXT(),
         };
-        let mut tc_block = block(Some(&format!(" {toggle} TestCase {index} ")))
-            .borders(Borders::TOP)
-            .padding(Padding::ZERO)
-            .border_type(BorderType::Rounded)
-            .border_style(border_color)
-            .title_style(Style::new().fg(title_color).bold());
-
-        let chip = self.verdict.chip();
-        if !chip.is_empty() {
-            tc_block = tc_block.title(
-                Line::from(Span::styled(chip, Style::new().fg(verdict_color).bold()))
-                    .alignment(Right),
-            );
+        let mut title = vec![Span::styled(
+            format!(" {toggle} "),
+            Style::new().fg(title_color).bold(),
+        )];
+        title.push(Span::styled(
+            format!("TestCase {index} "),
+            Style::new().fg(title_color).bold(),
+        ));
+        if focus == CaseFocus::Delete {
+            title.push(Span::styled("X", Style::new().fg(theme::RED()).bold()));
         }
+        let header = Rect {
+            height: 1,
+            ..area
+        };
+        let chip = self.verdict.chip();
+        let used = title
+            .iter()
+            .map(|span| span.content.chars().count())
+            .sum::<usize>()
+            + chip.chars().count();
+        let gap = (area.width as usize).saturating_sub(used);
+        if gap > 0 {
+            title.push(Span::styled(
+                "─".repeat(gap),
+                Style::new().fg(theme::BORDER()),
+            ));
+        }
+        if !chip.is_empty() {
+            title.push(Span::styled(chip, Style::new().fg(verdict_color).bold()));
+        }
+        Paragraph::new(Line::from(title)).render(header, buf);
 
         if self.collapsed {
             self.input_box.rect = Rect::default();
             self.expected_box.rect = Rect::default();
             self.got_box.rect = Rect::default();
-            tc_block.render(area, buf);
             return;
         }
-        let inner = tc_block.inner(area);
+        let inner = Rect {
+            y: area.y + 1,
+            height: area.height.saturating_sub(1),
+            ..area
+        };
         let input_height = (self.input_lines() + 2) as u16;
         let output_height = (self.output_rows() + 2) as u16;
         let v = Layout::vertical([Length(input_height), Length(output_height)]).split(inner);
@@ -633,26 +654,21 @@ impl TestCase {
         self.got_box.rect = h[1];
 
         let is_editing = focus == CaseFocus::Edit;
-        let deleting = focus == CaseFocus::Delete;
         let input_active = matches!(active_box, ActiveBox::Input) && is_editing;
         let expected_active = matches!(active_box, ActiveBox::Expected) && is_editing;
 
-        let input_border = if deleting {
-            theme::RED
-        } else if input_active {
-            theme::ACCENT
+        let input_border = if input_active {
+            theme::ACCENT()
         } else {
             verdict_border
         };
-        let expected_border = if deleting {
-            theme::RED
-        } else if expected_active {
-            theme::ACCENT
+        let expected_border = if expected_active {
+            theme::ACCENT()
         } else {
             verdict_border
         };
-        let input_title = if deleting { theme::RED } else { theme::MUTED };
-        let expected_title = if deleting { theme::RED } else { theme::MUTED };
+        let input_title = theme::TITLE();
+        let expected_title = theme::TITLE();
 
         Self::render_pane(
             buf,
@@ -683,19 +699,17 @@ impl TestCase {
             .into_iter()
             .map(|line| clip_line(line, got_width))
             .collect();
-        let got_border = if deleting { theme::RED } else { verdict_border };
-        let got_title = if deleting { theme::RED } else { theme::MUTED };
+        let got_border = verdict_border;
+        let got_title = theme::TITLE();
         let got_panel = Paragraph::new(Text::from(got_lines))
-            .style(Style::new().fg(theme::TEXT))
+            .style(Style::new().fg(theme::TEXT()))
             .block(
                 block(Some(" [Got] "))
                     .border_style(got_border)
                     .title_style(Style::new().fg(got_title).bold())
-                    .title_alignment(Left),
+                    .title_alignment(Right),
             );
         got_panel.render(self.got_box.rect, buf);
-
-        tc_block.render(area, buf);
     }
 
     fn wa_diff_active(&self) -> bool {
@@ -722,14 +736,14 @@ impl TestCase {
         let Some(got) = &self.got_content else {
             return vec![Line::from(Span::styled(
                 "run tests [r] to see the output",
-                Style::new().fg(theme::MUTED).italic(),
+                Style::new().fg(theme::MUTED()).italic(),
             ))];
         };
 
         if got.is_empty() {
             return vec![Line::from(Span::styled(
                 "(no output)",
-                Style::new().fg(theme::MUTED).italic(),
+                Style::new().fg(theme::MUTED()).italic(),
             ))];
         }
 
@@ -743,7 +757,7 @@ impl TestCase {
             highlight_got(&expected, &stdout.text)
         } else {
             let style = if matches!(self.verdict, CaseVerdict::CE | CaseVerdict::RE) {
-                Style::new().fg(theme::RED)
+                Style::new().fg(theme::RED())
             } else {
                 Style::new()
             };
@@ -807,7 +821,7 @@ impl TestCase {
         // positions the terminal cursor on render, so rendering another TextArea
         // after it would steal the cursor.
         if is_editing && is_active {
-            textarea.set_style(Style::new().fg(theme::TEXT));
+            textarea.set_style(Style::new().fg(theme::TEXT()));
             textarea.set_cursor_style(cursor_style);
             textarea.set_block(pane_block);
             textarea.render(state.rect, buf);
@@ -816,7 +830,7 @@ impl TestCase {
             let panel = if text.trim().is_empty() {
                 Paragraph::new(Line::from(Span::styled(
                     placeholder,
-                    Style::new().fg(theme::MUTED).italic(),
+                    Style::new().fg(theme::MUTED()).italic(),
                 )))
                 .block(pane_block)
             } else {
@@ -826,7 +840,7 @@ impl TestCase {
                     .map(|line| clip_line(line, width))
                     .collect();
                 Paragraph::new(Text::from(lines))
-                    .style(Style::new().fg(theme::TEXT))
+                    .style(Style::new().fg(theme::TEXT()))
                     .block(pane_block)
             };
             panel.render(state.rect, buf);
@@ -880,11 +894,11 @@ const DIFF_SKIPPED_NOTE: &str = "… diff skipped for large output";
 pub(crate) const STDERR_MARKER: &str = "\n── stderr ──\n";
 
 fn extra_style() -> Style {
-    Style::new().fg(theme::RED)
+    Style::new().fg(theme::RED())
 }
 
 fn muted(text: String) -> Line<'static> {
-    Line::from(Span::styled(text, Style::new().fg(theme::MUTED).italic()))
+    Line::from(Span::styled(text, Style::new().fg(theme::MUTED()).italic()))
 }
 
 fn split_stderr(got: &str) -> (&str, Option<&str>) {
@@ -1037,7 +1051,7 @@ fn clip_line(line: Line<'static>, max_width: usize) -> Line<'static> {
             _ => spans.push(Span::styled(grapheme.symbol.to_string(), grapheme.style)),
         }
     }
-    spans.push(Span::styled("…", Style::new().fg(theme::MUTED)));
+    spans.push(Span::styled("…", Style::new().fg(theme::MUTED())));
     Line::from(spans)
 }
 
@@ -1201,22 +1215,28 @@ mod tests {
     }
 
     #[test]
-    fn delete_focus_turns_every_pane_border_red() {
+    fn delete_focus_marks_the_title_and_keeps_the_verdict_color() {
         let mut tc = TestCase::new("1", "2");
+        tc.set_result(CaseVerdict::WA { ms: 1 }, "0".into());
+        tc.collapsed = false;
         let area = Rect::new(0, 0, 80, 12);
         let mut buffer = Buffer::empty(area);
         tc.draw_tc(&mut buffer, area, 1, ActiveBox::None, CaseFocus::Delete);
 
-        assert_eq!(
-            buffer[(area.width / 2, 0)].fg,
-            theme::RED,
-            "the case card border is red too"
+        let title: String = (0..area.width).map(|x| buffer[(x, 0)].symbol()).collect();
+        assert!(title.contains('X'), "{title}");
+        let delete_x = title.chars().position(|c| c == 'X').unwrap() as u16;
+        assert_eq!(buffer[(delete_x, 0)].fg, theme::RED());
+        let head = title.trim_start();
+        assert!(
+            head.starts_with('▼') && head.contains('─'),
+            "the name comes first and the rule follows: {title}"
         );
         for pane in [&tc.input_box, &tc.expected_box, &tc.got_box] {
             assert_eq!(
                 buffer[(pane.rect.x, pane.rect.y)].fg,
-                theme::RED,
-                "every pane of the selected case must be red in delete mode"
+                theme::RED(),
+                "a WA card keeps its red panes while it is the delete target"
             );
         }
     }
@@ -1224,12 +1244,12 @@ mod tests {
     #[test]
     fn verdict_colors_every_pane() {
         for (verdict, expected) in [
-            (CaseVerdict::Pending, theme::BORDER),
-            (CaseVerdict::AC { ms: 1 }, theme::GREEN),
-            (CaseVerdict::WA { ms: 1 }, theme::RED),
-            (CaseVerdict::Tle, theme::YELLOW),
-            (CaseVerdict::RE, theme::PURPLE),
-            (CaseVerdict::CE, theme::ORANGE),
+            (CaseVerdict::Pending, theme::BORDER()),
+            (CaseVerdict::AC { ms: 1 }, theme::GREEN()),
+            (CaseVerdict::WA { ms: 1 }, theme::RED()),
+            (CaseVerdict::Tle, theme::YELLOW()),
+            (CaseVerdict::RE, theme::RED()),
+            (CaseVerdict::CE, theme::ORANGE()),
         ] {
             let mut tc = TestCase::new("1", "2");
             if !matches!(verdict, CaseVerdict::Pending) {
@@ -1260,22 +1280,22 @@ mod tests {
 
         assert_eq!(
             buffer[(2, 0)].fg,
-            theme::ACCENT,
+            theme::ACCENT(),
             "the active case title is accent blue"
         );
         assert_eq!(
             buffer[(tc.input_box.rect.x, tc.input_box.rect.y)].fg,
-            theme::ACCENT,
+            theme::ACCENT(),
             "the focused pane is accent blue"
         );
         assert_eq!(
             buffer[(tc.expected_box.rect.x, tc.expected_box.rect.y)].fg,
-            theme::RED,
+            theme::RED(),
             "the other editable pane keeps its verdict color while editing"
         );
         assert_eq!(
             buffer[(tc.got_box.rect.x, tc.got_box.rect.y)].fg,
-            theme::RED,
+            theme::RED(),
             "the Got pane keeps its verdict color"
         );
     }
@@ -1289,8 +1309,8 @@ mod tests {
 
         assert_eq!(
             buffer[(2, 0)].fg,
-            Color::Reset,
-            "the container title uses the terminal's default color"
+            theme::TEXT(),
+            "the case name stays plain text"
         );
     }
 
@@ -1309,7 +1329,7 @@ mod tests {
     fn red_spans(line: &Line<'static>) -> Vec<String> {
         line.spans
             .iter()
-            .filter(|span| span.style.fg == Some(theme::RED))
+            .filter(|span| span.style.fg == Some(theme::RED()))
             .map(|span| span.content.to_string())
             .collect()
     }
@@ -1335,7 +1355,7 @@ mod tests {
             got[0]
                 .spans
                 .iter()
-                .all(|span| span.style.bg != Some(theme::GREEN))
+                .all(|span| span.style.bg != Some(theme::GREEN()))
         );
     }
 

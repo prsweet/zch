@@ -172,6 +172,36 @@ fn std_from_flags(flags: &[String]) -> Option<u32> {
     flags.iter().rev().find_map(|flag| std_from_flag(flag))
 }
 
+/// Named palette. The config section cycles this list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AppTheme {
+    #[default]
+    Mocha,
+    #[serde(rename = "prsweet's favourite")]
+    Prsweet,
+}
+
+impl AppTheme {
+    pub const ALL: [AppTheme; 2] = [AppTheme::Mocha, AppTheme::Prsweet];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AppTheme::Mocha => "Mocha",
+            AppTheme::Prsweet => "prsweet's favourite",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let index = Self::ALL.iter().position(|theme| *theme == self).unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
+    }
+
+    pub fn prev(self) -> Self {
+        let index = Self::ALL.iter().position(|theme| *theme == self).unwrap_or(0);
+        Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct UserConfig {
     #[serde(default)]
@@ -180,6 +210,8 @@ pub struct UserConfig {
     pub extra_flags: Vec<String>,
     #[serde(default)]
     pub flags_by_language: HashMap<Language, Vec<String>>,
+    #[serde(default)]
+    pub theme: AppTheme,
 }
 
 impl UserConfig {
@@ -329,6 +361,7 @@ mod tests {
                 (Language::Cpp, vec!["-O2".into()]),
                 (Language::Python, vec!["-B".into()]),
             ]),
+            ..Default::default()
         };
 
         config.normalize();

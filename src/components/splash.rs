@@ -25,27 +25,27 @@ pub fn render(frame: &mut Frame, area: Rect, spinner: &str, tick: i64, port: u16
     let lines = vec![
         Line::styled(
             "the competitive programming helper",
-            Style::new().fg(theme::TEXT).bold(),
+            Style::new().fg(theme::TEXT()).bold(),
         ),
         Line::default(),
         Line::styled(
             "compile · run · submit — right from your editor",
-            Style::new().fg(theme::MUTED).italic(),
+            Style::new().fg(theme::MUTED()).italic(),
         ),
         Line::default(),
         Line::default(),
         Line::from(vec![
-            Span::styled(format!("{spinner} "), Style::new().fg(theme::CYAN)),
+            Span::styled(format!("{spinner} "), Style::new().fg(theme::CYAN())),
             Span::styled(
                 format!("listening on 127.0.0.1:{port}"),
-                Style::new().fg(theme::CYAN),
+                Style::new().fg(theme::CYAN()),
             ),
         ]),
         Line::from(vec![
-            Span::styled(version, Style::new().fg(theme::BORDER)),
+            Span::styled(version, Style::new().fg(theme::BORDER())),
             Span::styled(
                 " — send a problem with Competitive Companion",
-                Style::new().fg(theme::MUTED),
+                Style::new().fg(theme::MUTED()),
             ),
         ]),
     ];

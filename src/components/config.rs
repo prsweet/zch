@@ -10,13 +10,13 @@ use ratatui::{
     },
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Clear, Paragraph, Scrollbar, ScrollbarState},
+    widgets::{Clear, Paragraph, ScrollbarOrientation, ScrollbarState},
 };
 use ratatui_textarea::TextArea;
 
 use crate::{
-    components::{ScrollbarDrag, block, scroll_to_show, step_wrapped, theme},
-    core::{Language, UserConfig, std_from_flag},
+    components::{ScrollbarDrag, block, scroll_to_show, scrollbar, step_wrapped, theme},
+    core::{AppTheme, Language, UserConfig, std_from_flag},
 };
 
 const MIN_VISIBLE_FLAGS: usize = 3;
@@ -32,6 +32,7 @@ enum DeleteStage {
 
 pub struct ConfigMenu {
     pub language: Language,
+    pub theme: AppTheme,
     pub flags: Vec<String>,
     pub flags_by_language: HashMap<Language, Vec<String>>,
     pub draft: TextArea<'static>,
@@ -54,6 +55,7 @@ impl ConfigMenu {
             .clone();
         Self {
             language: config.language,
+            theme: config.theme,
             flag_cursor: flags.len().saturating_sub(1),
             flags,
             flags_by_language,
@@ -75,6 +77,7 @@ impl ConfigMenu {
             language: self.language,
             extra_flags: self.flags.clone(),
             flags_by_language,
+            theme: self.theme,
         }
     }
 
@@ -164,26 +167,32 @@ impl ConfigMenu {
     pub fn draw(&mut self, frame: &mut Frame, area: ratatui::layout::Rect) {
         let max_popup = area.height.saturating_sub(2).max(11);
         let desired_flags = self.visible_flag_rows() as u16 + 2;
-        let popup_height = (9 + desired_flags).min(max_popup);
-        let flags_height = popup_height.saturating_sub(9).max(2);
+        let popup_height = (12 + desired_flags).min(max_popup);
+        let flags_height = popup_height.saturating_sub(12).max(2);
         let popup_area = area.centered(Percentage(64), Length(popup_height));
         frame.render_widget(Clear, popup_area);
 
         let popup_block = block(Some(" Config "))
-            .border_style(theme::ACCENT)
-            .title_style(Style::new().fg(theme::ACCENT).bold())
+            .border_style(theme::ACCENT())
+            .title_style(Style::new().fg(theme::ACCENT()).bold())
             .title_alignment(Center);
         let popup_inner = popup_block.inner(popup_area);
         frame.render_widget(popup_block, popup_area);
 
-        let divisions = Layout::vertical([Length(3), Length(flags_height), Length(3), Length(1)])
-            .split(popup_inner);
+        let divisions = Layout::vertical([
+            Length(3),
+            Length(flags_height),
+            Length(3),
+            Length(3),
+            Length(1),
+        ])
+        .split(popup_inner);
 
         let lang_active = self.active_field == 0;
         let lang_color = if lang_active {
-            theme::GREEN
+            theme::GREEN()
         } else {
-            theme::BORDER
+            theme::BORDER()
         };
         let lang_panel = Paragraph::new(Line::from(vec![
             Span::styled(
@@ -193,7 +202,7 @@ impl ConfigMenu {
             Span::styled(
                 self.language.label(),
                 Style::new().bold().fg(if lang_active {
-                    theme::GREEN
+                    theme::GREEN()
                 } else {
                     Color::Reset
                 }),
@@ -214,11 +223,11 @@ impl ConfigMenu {
         let flags_active = self.active_field == 1;
         let deleting = self.delete_stage != DeleteStage::Off;
         let flags_color = if deleting {
-            theme::RED
+            theme::RED()
         } else if flags_active {
-            theme::GREEN
+            theme::GREEN()
         } else {
-            theme::BORDER
+            theme::BORDER()
         };
         let list_height = flags_height.saturating_sub(2) as usize;
         self.ensure_flag_visible_with(list_height);
@@ -237,7 +246,7 @@ impl ConfigMenu {
         if self.flags.is_empty() {
             let empty = Paragraph::new(Line::from(Span::styled(
                 "no flags — type one below and press Enter",
-                Style::new().fg(theme::MUTED).italic(),
+                Style::new().fg(theme::MUTED()).italic(),
             )));
             frame.render_widget(empty, flags_inner);
         } else {
@@ -259,12 +268,12 @@ impl ConfigMenu {
                 let selected = index == self.flag_cursor;
                 let style = match (self.delete_stage, selected) {
                     (DeleteStage::Confirm, true) => {
-                        Style::new().fg(Color::Black).bg(theme::RED).bold()
+                        Style::new().fg(Color::Black).bg(theme::RED()).bold()
                     }
-                    (DeleteStage::Select, true) => Style::new().fg(theme::RED).bold(),
-                    (_, true) if flags_active => Style::new().fg(theme::GREEN).bold(),
-                    (_, true) => Style::new().fg(theme::TEXT).bold(),
-                    _ => Style::new().fg(theme::TEXT),
+                    (DeleteStage::Select, true) => Style::new().fg(theme::RED()).bold(),
+                    (_, true) if flags_active => Style::new().fg(theme::GREEN()).bold(),
+                    (_, true) => Style::new().fg(theme::TEXT()).bold(),
+                    _ => Style::new().fg(theme::TEXT()),
                 };
                 let marker = if selected && deleting { "▸ " } else { "  " };
                 lines.push(Line::from(vec![
@@ -277,22 +286,20 @@ impl ConfigMenu {
             if needs_scrollbar {
                 let mut state =
                     ScrollbarState::new(self.flags.len() - list_height).position(self.flag_scroll);
-                let scrollbar = Scrollbar::default()
-                    .orientation(ratatui::widgets::ScrollbarOrientation::VerticalRight)
-                    .style(theme::MUTED)
-                    .track_style(theme::BORDER)
-                    .begin_symbol(Some("-"))
-                    .end_symbol(Some("-"));
-                frame.render_stateful_widget(scrollbar, scrollbar_area, &mut state);
+                frame.render_stateful_widget(
+                    scrollbar(ScrollbarOrientation::VerticalRight),
+                    scrollbar_area,
+                    &mut state,
+                );
             }
         }
 
         let draft_color = if flags_active && !deleting {
-            theme::GREEN
+            theme::GREEN()
         } else {
-            theme::BORDER
+            theme::BORDER()
         };
-        self.draft.set_style(Style::new().fg(theme::TEXT));
+        self.draft.set_style(Style::new().fg(theme::TEXT()));
         self.draft.set_block(
             block(Some(" Add flag "))
                 .border_style(draft_color)
@@ -305,15 +312,47 @@ impl ConfigMenu {
         });
         frame.render_widget(&self.draft, divisions[2]);
 
+        let theme_active = self.active_field == 2;
+        let theme_color = if theme_active {
+            theme::GREEN()
+        } else {
+            theme::BORDER()
+        };
+        let theme_panel = Paragraph::new(Line::from(vec![
+            Span::styled(
+                if theme_active { " ◀ " } else { "   " },
+                Style::new().fg(theme_color),
+            ),
+            Span::styled(
+                self.theme.label(),
+                Style::new().bold().fg(if theme_active {
+                    theme::GREEN()
+                } else {
+                    Color::Reset
+                }),
+            ),
+            Span::styled(
+                if theme_active { " ▶ " } else { "" },
+                Style::new().fg(theme_color),
+            ),
+        ]))
+        .alignment(Center)
+        .block(
+            block(Some(" Theme "))
+                .border_style(theme_color)
+                .title_alignment(Center),
+        );
+        frame.render_widget(theme_panel, divisions[3]);
+
         let hint = match &self.error {
             Some(error) => Line::from(Span::styled(
                 format!(" ✘ {error}"),
-                Style::new().fg(theme::RED),
+                Style::new().fg(theme::RED()),
             )),
             None => match self.delete_stage {
                 DeleteStage::Select => Line::from(Span::styled(
                     " Tab selects · Enter confirms · Esc cancels",
-                    Style::new().fg(theme::RED),
+                    Style::new().fg(theme::RED()),
                 )),
                 DeleteStage::Confirm => {
                     let flag = self
@@ -323,13 +362,13 @@ impl ConfigMenu {
                         .unwrap_or("");
                     Line::from(Span::styled(
                         format!(" Enter deletes {flag} · Backspace backs out"),
-                        Style::new().fg(theme::RED).bold(),
+                        Style::new().fg(theme::RED()).bold(),
                     ))
                 }
                 DeleteStage::Off => Line::from(""),
             },
         };
-        frame.render_widget(Paragraph::new(hint), divisions[3]);
+        frame.render_widget(Paragraph::new(hint), divisions[4]);
     }
 
     /// Mouse wheel and scrollbar dragging. Returns true when the event was
@@ -433,7 +472,7 @@ impl ConfigMenu {
             KeyCode::Tab | KeyCode::BackTab => {
                 let backwards =
                     key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT);
-                self.active_field = step_wrapped(self.active_field, 2, backwards);
+                self.active_field = step_wrapped(self.active_field, 3, backwards);
                 self.error = None;
             }
             KeyCode::Left if self.active_field == 0 => {
@@ -441,6 +480,14 @@ impl ConfigMenu {
             }
             KeyCode::Right if self.active_field == 0 => {
                 self.switch_language(self.language.next());
+            }
+            KeyCode::Left if self.active_field == 2 => {
+                self.theme = self.theme.prev();
+                theme::apply(self.theme);
+            }
+            KeyCode::Right if self.active_field == 2 => {
+                self.theme = self.theme.next();
+                theme::apply(self.theme);
             }
             KeyCode::Char('x') if self.draft.is_empty() && !self.flags.is_empty() => {
                 self.flag_cursor = self.flag_cursor.min(self.flags.len() - 1);
@@ -586,9 +633,27 @@ mod tests {
         assert_eq!(menu.active_field, 0);
         menu.handle_key(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
         assert_eq!(
-            menu.active_field, 1,
+            menu.active_field, 2,
             "a terminal that reports Shift+Tab as Tab must still go back"
         );
+    }
+
+    #[test]
+    fn theme_section_sits_under_the_flag_draft() {
+        let mut menu = menu_with(&[]);
+        let opened = screen(&mut menu, 80, 28);
+        assert!(opened.contains("Theme"), "{opened}");
+        assert!(opened.contains("Mocha"), "{opened}");
+        menu.handle_key(key(KeyCode::Tab));
+        menu.handle_key(key(KeyCode::Tab));
+        assert_eq!(menu.active_field, 2);
+        menu.handle_key(key(KeyCode::Right));
+        assert_eq!(menu.theme, AppTheme::Prsweet);
+        assert_eq!(menu.to_config().theme, AppTheme::Prsweet);
+        let chosen = screen(&mut menu, 80, 28);
+        assert!(chosen.contains("prsweet's favourite"), "{chosen}");
+        menu.handle_key(key(KeyCode::Left));
+        assert_eq!(menu.theme, AppTheme::Mocha);
     }
 
     #[test]
@@ -620,6 +685,7 @@ mod tests {
         type_text(&mut menu, "-u");
         menu.handle_key(key(KeyCode::Enter));
         menu.handle_key(key(KeyCode::Tab));
+        menu.handle_key(key(KeyCode::Tab));
 
         menu.handle_key(key(KeyCode::Left));
         assert_eq!(menu.language, Language::Cpp);
@@ -640,6 +706,7 @@ mod tests {
         let mut menu = menu_with(&[]);
         menu.handle_key(key(KeyCode::Tab));
         type_text(&mut menu, "-O2");
+        menu.handle_key(key(KeyCode::Tab));
         menu.handle_key(key(KeyCode::Tab));
 
         menu.handle_key(key(KeyCode::Right));

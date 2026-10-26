@@ -113,9 +113,9 @@ impl DirTerminal {
     }
 
     pub fn set_message(&mut self, color: Color, text: impl Into<String>) {
-        let lane = if color == theme::MUTED {
+        let lane = if color == theme::MUTED() {
             MessageLane::Hint
-        } else if color == theme::RED {
+        } else if color == theme::RED() {
             MessageLane::Error
         } else {
             MessageLane::Result
@@ -191,11 +191,10 @@ impl DirTerminal {
         };
         let dir_block = block(None)
             .border_style(if is_active {
-                theme::ACCENT
+                theme::ACCENT()
             } else {
-                theme::BORDER
+                theme::PURPLE()
             })
-            .title_style(Style::new().fg(theme::CYAN).bold())
             .title_alignment(Right);
 
         if is_active {
@@ -204,7 +203,7 @@ impl DirTerminal {
             frame.render_widget(&self.input_area, dir_area);
         } else {
             let dir_panel = Paragraph::new(format!("  {} ", self.cur_dir.display()))
-                .style(Style::new().fg(theme::TEXT))
+                .style(Style::new().fg(theme::TEXT()))
                 .block(dir_block.title(" [Working Directory] "))
                 .wrap(Wrap { trim: true });
             frame.render_widget(dir_panel, dir_area);
@@ -225,9 +224,8 @@ impl DirTerminal {
         )))
         .block(
             block(Some(" [Console] "))
-                .border_style(theme::BORDER)
-                .title_alignment(Right)
-                .title_style(Style::new().fg(theme::PURPLE).bold()),
+                .border_style(theme::PURPLE())
+                .title_alignment(Right),
         )
         .wrap(Wrap { trim: false });
         frame.render_widget(msg_panel, area);
@@ -285,8 +283,8 @@ impl DirTerminal {
                     self.clear_hint();
                     self.clear_error();
                 }
-                Ok(_) => self.set_message(theme::RED, format!("cd: not a directory: {target}")),
-                Err(_) => self.set_message(theme::RED, format!("cd: no such directory: {target}")),
+                Ok(_) => self.set_message(theme::RED(), format!("cd: not a directory: {target}")),
+                Err(_) => self.set_message(theme::RED(), format!("cd: no such directory: {target}")),
             }
         } else if cmd == "ls" {
             match fs::read_dir(&self.cur_dir) {
@@ -303,15 +301,15 @@ impl DirTerminal {
                         })
                         .collect();
                     names.sort();
-                    self.set_message(theme::CYAN, names.join("   "));
+                    self.set_message(theme::CYAN(), names.join("   "));
                 }
-                Err(e) => self.set_message(theme::RED, format!("ls: {e}")),
+                Err(e) => self.set_message(theme::RED(), format!("ls: {e}")),
             }
         } else if cmd == "pwd" {
-            self.set_message(theme::CYAN, self.cur_dir.display().to_string());
+            self.set_message(theme::CYAN(), self.cur_dir.display().to_string());
         } else {
             self.set_message(
-                theme::YELLOW,
+                theme::YELLOW(),
                 format!("unknown command: {cmd} (try: cd <path>, ls, pwd)"),
             );
         }
@@ -398,7 +396,7 @@ impl DirTerminal {
             .map(|name| format!("{} {dir_part}{name}/", icons::FOLDER))
             .collect::<Vec<_>>()
             .join("   ");
-        self.set_message(theme::CYAN, list);
+        self.set_message(theme::CYAN(), list);
     }
 
     fn set_input(&mut self, text: &str) {
@@ -486,13 +484,13 @@ mod tests {
     fn message_lanes_keep_errors_visible_and_results_authoritative() {
         let mut dir = DirTerminal::new(PathBuf::from("/tmp"));
 
-        dir.set_live(theme::CYAN, "running case 1/2");
-        dir.set_error(theme::RED, "network failed");
+        dir.set_live(theme::CYAN(), "running case 1/2");
+        dir.set_error(theme::RED(), "network failed");
         assert_eq!(dir.output.as_ref().unwrap().text, "network failed");
         assert_eq!(dir.lanes.live.as_ref().unwrap().text, "running case 1/2");
         assert_eq!(dir.lanes.error.as_ref().unwrap().text, "network failed");
 
-        dir.set_result(theme::GREEN, "all passed");
+        dir.set_result(theme::GREEN(), "all passed");
         assert_eq!(dir.lanes.live.as_ref().unwrap().text, "running case 1/2");
         assert!(
             dir.lanes.error.is_none(),
@@ -505,8 +503,8 @@ mod tests {
             "the run lifecycle ends the live phase"
         );
 
-        dir.set_error(theme::RED, "submit failed");
-        dir.set_live(theme::CYAN, "running case 2/2");
+        dir.set_error(theme::RED(), "submit failed");
+        dir.set_live(theme::CYAN(), "running case 2/2");
         assert_eq!(
             dir.output.as_ref().unwrap().text,
             "submit failed",
@@ -517,7 +515,7 @@ mod tests {
     #[test]
     fn console_renders_the_active_message_on_one_line() {
         let mut dir = DirTerminal::new(PathBuf::from("/tmp"));
-        dir.set_live(theme::CYAN, "running case 2/3");
+        dir.set_live(theme::CYAN(), "running case 2/3");
 
         let mut terminal = Terminal::new(TestBackend::new(40, 3)).unwrap();
         terminal
@@ -527,7 +525,7 @@ mod tests {
         let row = |y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>();
         assert!(row(1).contains("running case 2/3"));
 
-        dir.set_result(theme::GREEN, "2/3 passed");
+        dir.set_result(theme::GREEN(), "2/3 passed");
         terminal
             .draw(|frame| dir.draw_console(frame, Rect::new(0, 0, 40, 3)))
             .unwrap();
@@ -542,11 +540,11 @@ mod tests {
         let mut dir = DirTerminal::new(PathBuf::from("/tmp"));
         assert_eq!(dir.console_height(120), 0, "empty consoles take no space");
 
-        dir.set_result(theme::TEXT, "short");
+        dir.set_result(theme::TEXT(), "short");
         assert_eq!(dir.console_height(120), 3);
         assert_eq!(dir.console_height(10), 3);
 
-        dir.set_result(theme::TEXT, "long ".repeat(500));
+        dir.set_result(theme::TEXT(), "long ".repeat(500));
         assert_eq!(
             dir.console_height(120),
             3,

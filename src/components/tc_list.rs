@@ -3,19 +3,16 @@ use ratatui::{
     buffer::Buffer,
     crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
     layout::{
-        Alignment,
         Constraint::{Length, Percentage},
         Layout, Position, Rect,
     },
-    style::Style,
-    text::{Line, Span},
-    widgets::{Paragraph, Scrollbar, ScrollbarState},
+    style::Modifier,
+    widgets::{ScrollbarOrientation, ScrollbarState},
 };
 
 use crate::components::{
-    ScrollbarDrag, step_wrapped,
+    ScrollbarDrag, scrollbar, step_wrapped,
     testcase::{ActiveBox, CaseFocus, PaneKind, TestCase},
-    theme,
 };
 
 pub struct TestCaseList {
@@ -108,7 +105,7 @@ impl TestCaseList {
     }
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect, focus: CaseFocus) {
-        if area.height < 3 || area.width == 0 {
+        if area.height == 0 || area.width == 0 {
             self.available_height = 0;
             self.scrollbar_area = Rect::default();
             self.scrollbar_drag = None;
@@ -118,12 +115,7 @@ impl TestCaseList {
             return;
         }
 
-        let viewport = Rect {
-            x: area.x,
-            y: area.y + 1,
-            width: area.width,
-            height: area.height - 2,
-        };
+        let viewport = area;
         self.available_height = viewport.height as usize;
         for tc in self.testcases.iter_mut() {
             tc.clear_height_caps();
@@ -140,27 +132,20 @@ impl TestCaseList {
         let total = self.total_rows();
         let needs_scrollbar = total > self.available_height;
 
-        let (tc_list_area, scrollbar_render_area) = if viewport.width >= 3 {
-            let division = Layout::horizontal([Percentage(100), Length(2)]).split(viewport);
-            (division[0], division[1])
-        } else {
-            (viewport, Rect::default())
-        };
+        let (tc_list_area, scrollbar_render_area) =
+            if needs_scrollbar && viewport.width >= 2 {
+                let division = Layout::horizontal([Percentage(100), Length(1)]).split(viewport);
+                (division[0], division[1])
+            } else {
+                (viewport, Rect::default())
+            };
 
-        self.scrollbar_area = if needs_scrollbar {
-            scrollbar_render_area
-        } else {
-            Rect::default()
-        };
+        self.scrollbar_area = scrollbar_render_area;
         if !needs_scrollbar {
             self.scrollbar_drag = None;
         }
 
-        let scroll_bar = Scrollbar::new(ratatui::widgets::ScrollbarOrientation::VerticalRight)
-            .style(theme::MUTED)
-            .track_style(theme::BORDER)
-            .begin_symbol(Some("-"))
-            .end_symbol(Some("-"));
+        let scroll_bar = scrollbar(ScrollbarOrientation::VerticalRight);
 
         self.scroll_row = self
             .scroll_row
@@ -210,6 +195,11 @@ impl TestCaseList {
                 ActiveBox::None
             };
             tc.draw_tc(&mut scratch, scratch_area, idx + 1, active_box, case_focus);
+            if focus == CaseFocus::Delete && case_focus == CaseFocus::None {
+                for cell in scratch.content.iter_mut() {
+                    cell.modifier.insert(Modifier::DIM);
+                }
+            }
 
             let dest_x = tc_list_area.x;
             let dest_y = tc_list_area.y + (tc_top.saturating_sub(start_row)) as u16;
@@ -238,45 +228,9 @@ impl TestCaseList {
             let mut scroll_state = ScrollbarState::new(scroll_range).position(self.scroll_row);
             frame.render_stateful_widget(scroll_bar, scrollbar_render_area, &mut scroll_state);
         }
-
-        let more = |text: &str| {
-            let label = format!("{text} ");
-            let total = tc_list_area.width.min(32);
-            let label_width = label.chars().count() as u16;
-            if total <= label_width + 2 {
-                return Line::from(Span::styled(label, Style::new().fg(theme::MUTED)));
-            }
-            let rule = total - label_width;
-            Line::from(vec![
-                Span::styled(label, Style::new().fg(theme::MUTED)),
-                Span::styled("─".repeat(rule as usize), Style::new().fg(theme::BORDER)),
-            ])
-        };
-        if self.scroll_row > 0 {
-            frame.render_widget(
-                Paragraph::new(more("↑ more")).alignment(Alignment::Left),
-                Rect {
-                    x: tc_list_area.x,
-                    y: area.y,
-                    width: tc_list_area.width,
-                    height: 1,
-                },
-            );
-        }
-        if self.scroll_row + self.available_height < total {
-            frame.render_widget(
-                Paragraph::new(more("↓ more")).alignment(Alignment::Left),
-                Rect {
-                    x: tc_list_area.x,
-                    y: area.y + area.height - 1,
-                    width: tc_list_area.width,
-                    height: 1,
-                },
-            );
-        }
     }
 
-    pub fn handle_key(&mut self, event: Event) {
+    pub fn handle_key(&mut self, event: Event, stay_in_case: bool) {
         if let Event::Key(key) = event {
             if self.testcases.is_empty() {
                 return;
@@ -284,20 +238,28 @@ impl TestCaseList {
             if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
                 let backwards =
                     key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT);
-                match (self.active_box, backwards) {
-                    (ActiveBox::Input, false) => self.active_box = ActiveBox::Expected,
-                    (ActiveBox::Input, true) => {
-                        self.active_box = ActiveBox::Expected;
-                        self.active_area =
-                            step_wrapped(self.active_area, self.testcases.len(), true);
+                if stay_in_case {
+                    self.active_box = match self.active_box {
+                        ActiveBox::Input => ActiveBox::Expected,
+                        ActiveBox::Expected => ActiveBox::Input,
+                        ActiveBox::None => ActiveBox::Input,
+                    };
+                } else {
+                    match (self.active_box, backwards) {
+                        (ActiveBox::Input, false) => self.active_box = ActiveBox::Expected,
+                        (ActiveBox::Input, true) => {
+                            self.active_box = ActiveBox::Expected;
+                            self.active_area =
+                                step_wrapped(self.active_area, self.testcases.len(), true);
+                        }
+                        (ActiveBox::Expected, false) => {
+                            self.active_box = ActiveBox::Input;
+                            self.active_area =
+                                step_wrapped(self.active_area, self.testcases.len(), false);
+                        }
+                        (ActiveBox::Expected, true) => self.active_box = ActiveBox::Input,
+                        (ActiveBox::None, _) => self.active_box = ActiveBox::Input,
                     }
-                    (ActiveBox::Expected, false) => {
-                        self.active_box = ActiveBox::Input;
-                        self.active_area =
-                            step_wrapped(self.active_area, self.testcases.len(), false);
-                    }
-                    (ActiveBox::Expected, true) => self.active_box = ActiveBox::Input,
-                    (ActiveBox::None, _) => self.active_box = ActiveBox::Input,
                 }
                 self.manual_scroll = false;
                 self.update_scroll();
@@ -479,6 +441,14 @@ mod tests {
 
         let area = list.scrollbar_area;
         assert!(area.height > 2, "the case list must expose a scrollbar");
+        assert_eq!(area.width, 1, "the case-list scrollbar is one cell wide");
+        let buffer = terminal.backend().buffer();
+        for row in area.y..area.y + area.height {
+            assert!(
+                matches!(buffer[(area.x, row)].symbol(), "┃" | "│"),
+                "the case-list scrollbar uses thin glyphs"
+            );
+        }
         let bottom = area.y + area.height - 2;
 
         list.handle_mouse(&mouse(
@@ -504,7 +474,7 @@ mod tests {
     }
 
     #[test]
-    fn list_width_does_not_change_when_the_scrollbar_appears() {
+    fn list_only_reserves_a_column_when_the_scrollbar_is_needed() {
         let mut list = TestCaseList::new();
         list.testcases.push(TestCase::new("0", ""));
 
@@ -514,6 +484,7 @@ mod tests {
             .unwrap();
         let width_without_scrollbar = list.testcases[0].area.rect.width;
         assert_eq!(list.scrollbar_area, Rect::default());
+        assert_eq!(width_without_scrollbar, 60);
 
         for index in 1..20 {
             list.testcases.push(TestCase::new(&format!("{index}"), ""));
@@ -522,31 +493,12 @@ mod tests {
             .draw(|frame| list.draw(frame, frame.area(), CaseFocus::None))
             .unwrap();
 
-        assert!(list.scrollbar_area.width > 0, "the list must now scroll");
+        assert_eq!(list.scrollbar_area.width, 1, "the scrollbar is thin");
         assert_eq!(
-            list.testcases[0].area.rect.width, width_without_scrollbar,
-            "reserving the gutter must keep the list width stable"
+            list.testcases[0].area.rect.width,
+            width_without_scrollbar - 1,
+            "the list gives up one column only when the scrollbar appears"
         );
     }
 
-    #[test]
-    fn scrolled_list_marks_more_content_above_and_below() {
-        let mut list = TestCaseList::new();
-        for index in 0..20 {
-            list.testcases.push(TestCase::new(&format!("{index}"), ""));
-        }
-
-        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
-        list.scroll_row = 5;
-        terminal
-            .draw(|frame| list.draw(frame, frame.area(), CaseFocus::None))
-            .unwrap();
-
-        let buffer = terminal.backend().buffer();
-        let row = |y| (0..60).map(|x| buffer[(x, y)].symbol()).collect::<String>();
-        assert!(row(0).starts_with("↑ more"), "top gutter row: {}", row(0));
-        assert!(row(0).contains("─"), "top gutter row: {}", row(0));
-        assert!(row(19).starts_with("↓ more"), "bottom gutter row: {}", row(19));
-        assert!(row(19).contains("─"), "bottom gutter row: {}", row(19));
-    }
 }
