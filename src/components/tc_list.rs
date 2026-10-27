@@ -132,13 +132,12 @@ impl TestCaseList {
         let total = self.total_rows();
         let needs_scrollbar = total > self.available_height;
 
-        let (tc_list_area, scrollbar_render_area) =
-            if needs_scrollbar && viewport.width >= 2 {
-                let division = Layout::horizontal([Percentage(100), Length(1)]).split(viewport);
-                (division[0], division[1])
-            } else {
-                (viewport, Rect::default())
-            };
+        let (tc_list_area, scrollbar_render_area) = if needs_scrollbar && viewport.width >= 2 {
+            let division = Layout::horizontal([Percentage(100), Length(1)]).split(viewport);
+            (division[0], division[1])
+        } else {
+            (viewport, Rect::default())
+        };
 
         self.scrollbar_area = scrollbar_render_area;
         if !needs_scrollbar {
@@ -318,6 +317,20 @@ impl TestCaseList {
         None
     }
 
+    pub fn scroll_with_key(&mut self, key: KeyCode) {
+        let max_scroll = self.total_rows().saturating_sub(self.available_height);
+        let page = self.available_height.saturating_sub(1).max(1);
+        self.scroll_row = match key {
+            KeyCode::PageDown => self.scroll_row.saturating_add(page).min(max_scroll),
+            KeyCode::PageUp => self.scroll_row.saturating_sub(page),
+            KeyCode::Home => 0,
+            KeyCode::End => max_scroll,
+            _ => return,
+        };
+        self.manual_scroll = true;
+        self.scrollbar_drag = None;
+    }
+
     pub fn handle_mouse(&mut self, mouse: &MouseEvent) {
         let position = Position::new(mouse.column, mouse.row);
         let max_scroll = self.total_rows().saturating_sub(self.available_height);
@@ -389,6 +402,32 @@ mod tests {
             row,
             modifiers: KeyModifiers::NONE,
         }
+    }
+
+    #[test]
+    fn keyboard_scroll_pages_and_stays_within_bounds() {
+        let mut list = TestCaseList::new();
+        for _ in 0..10 {
+            list.testcases.push(TestCase::new("1", "2"));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        terminal
+            .draw(|frame| list.draw(frame, frame.area(), CaseFocus::None))
+            .unwrap();
+        list.scroll_with_key(KeyCode::PageDown);
+        assert_eq!(list.scroll_row, 11);
+        terminal
+            .draw(|frame| list.draw(frame, frame.area(), CaseFocus::None))
+            .unwrap();
+        assert_eq!(list.scroll_row, 11);
+        list.scroll_with_key(KeyCode::End);
+        let end = list.total_rows().saturating_sub(list.available_height);
+        assert_eq!(list.scroll_row, end);
+        list.scroll_with_key(KeyCode::PageDown);
+        assert_eq!(list.scroll_row, end);
+        list.scroll_with_key(KeyCode::Home);
+        list.scroll_with_key(KeyCode::PageUp);
+        assert_eq!(list.scroll_row, 0);
     }
 
     #[test]
@@ -500,5 +539,4 @@ mod tests {
             "the list gives up one column only when the scrollbar appears"
         );
     }
-
 }

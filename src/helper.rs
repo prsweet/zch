@@ -1831,6 +1831,9 @@ impl Helper {
                     self.tc_list.update_scroll();
                 }
                 InputMode::Normal => match key.code {
+                    KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End => {
+                        self.tc_list.scroll_with_key(key.code);
+                    }
                     KeyCode::Esc if self.running => self.cancel_run(),
                     KeyCode::Char('q') => return Some(ToHelper(HelperCommand::Quit)),
                     KeyCode::Char('a') => {
