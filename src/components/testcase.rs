@@ -10,7 +10,7 @@ use ratatui::{
     crossterm::event::{MouseButton, MouseEvent, MouseEventKind},
     layout::{
         Constraint::{Length, Percentage},
-        HorizontalAlignment::Right,
+        HorizontalAlignment::{Left, Right},
         Layout, Rect,
     },
     style::{Color, Modifier, Style},
@@ -68,10 +68,10 @@ impl CaseVerdict {
 
     pub fn chip(&self) -> String {
         match self {
-            CaseVerdict::Pending => String::new(),
-            CaseVerdict::AC { ms } => format!(" ✔ AC · {ms}ms "),
-            CaseVerdict::WA { ms } => format!(" ✘ WA · {ms}ms "),
-            CaseVerdict::Tle => " ⏱ TLE ".to_string(),
+            CaseVerdict::Pending => " ○ Not run ".to_string(),
+            CaseVerdict::AC { ms } => format!(" ✔ AC · {ms} ms "),
+            CaseVerdict::WA { ms } => format!(" ✘ WA · {ms} ms "),
+            CaseVerdict::Tle => " ◷ TLE ".to_string(),
             CaseVerdict::RE => " ✘ RE ".to_string(),
             CaseVerdict::CE => " ✘ CE ".to_string(),
         }
@@ -580,6 +580,11 @@ impl TestCase {
         active_box: ActiveBox,
         focus: CaseFocus,
     ) {
+        self.clear_hit_areas();
+        if area.is_empty() {
+            return;
+        }
+        buf.set_style(area, Style::new().fg(theme::TEXT()).bg(theme::BASE()));
         self.area.rect = area;
         self.collapse_toggle_area.rect = Rect {
             x: area.x,
@@ -594,44 +599,47 @@ impl TestCase {
         } else {
             verdict_color
         };
-        let toggle = if self.collapsed { "▶" } else { "▼" };
+        let toggle = if self.collapsed { "▸" } else { "▾" };
         let title_color = match focus {
             CaseFocus::Edit => theme::ACCENT(),
-            CaseFocus::Delete => theme::TEXT(),
+            CaseFocus::Delete => theme::RED(),
             CaseFocus::None => theme::TEXT(),
         };
-        let mut title = vec![Span::styled(
-            format!(" {toggle} "),
-            Style::new().fg(title_color).bold(),
-        )];
-        title.push(Span::styled(
-            format!("TestCase {index} "),
-            Style::new().fg(title_color).bold(),
-        ));
-        if focus == CaseFocus::Delete {
-            title.push(Span::styled("X", Style::new().fg(theme::RED()).bold()));
-        }
-        let header = Rect {
-            height: 1,
-            ..area
+        let name = if area.width < 32 {
+            format!(" {toggle} {index:02} ")
+        } else {
+            format!(" {toggle} Case {index:02} ")
         };
-        let chip = self.verdict.chip();
-        let used = title
-            .iter()
-            .map(|span| span.content.chars().count())
-            .sum::<usize>()
-            + chip.chars().count();
-        let gap = (area.width as usize).saturating_sub(used);
-        if gap > 0 {
+        let mut title = vec![Span::styled(name, Style::new().fg(title_color).bold())];
+        if focus == CaseFocus::Delete {
             title.push(Span::styled(
-                "─".repeat(gap),
-                Style::new().fg(theme::BORDER()),
+                "× delete",
+                Style::new().fg(theme::RED()).bold(),
             ));
+        } else if focus == CaseFocus::Edit && area.width >= 52 {
+            title.push(Span::styled("· editing", Style::new().fg(theme::MUTED())));
         }
-        if !chip.is_empty() {
-            title.push(Span::styled(chip, Style::new().fg(verdict_color).bold()));
-        }
-        Paragraph::new(Line::from(title)).render(header, buf);
+        let header = Rect { height: 1, ..area };
+        let chip = self.verdict.chip();
+        // Give the verdict its own measured column. A long duration or a narrow
+        // terminal can never push the result off the right edge of the card.
+        let chip_width = Line::from(chip.as_str())
+            .width()
+            .min(area.width.saturating_sub(7) as usize) as u16;
+        let columns = Layout::horizontal([
+            Length(area.width.saturating_sub(chip_width)),
+            Length(chip_width),
+        ])
+        .split(header);
+        let header_style = Style::new().fg(theme::TEXT()).bg(theme::ELEVATED());
+        buf.set_style(header, header_style);
+        Paragraph::new(clip_line(Line::from(title), columns[0].width as usize))
+            .style(header_style)
+            .render(columns[0], buf);
+        Paragraph::new(clip_line(Line::from(chip), columns[1].width as usize))
+            .style(header_style.fg(verdict_color).bold())
+            .alignment(Right)
+            .render(columns[1], buf);
 
         if self.collapsed {
             self.input_box.rect = Rect::default();
@@ -660,37 +668,45 @@ impl TestCase {
         let input_border = if input_active {
             theme::ACCENT()
         } else {
-            verdict_border
+            theme::BORDER()
         };
         let expected_border = if expected_active {
             theme::ACCENT()
         } else {
-            verdict_border
+            theme::BORDER()
         };
-        let input_title = theme::TITLE();
-        let expected_title = theme::TITLE();
+        let input_title = if input_active {
+            theme::ACCENT()
+        } else {
+            theme::MUTED()
+        };
+        let expected_title = if expected_active {
+            theme::ACCENT()
+        } else {
+            theme::MUTED()
+        };
 
         Self::render_pane(
             buf,
             &mut self.inp_content,
             &self.input_box,
-            "",
+            " Input ",
             input_active,
             is_editing,
             input_border,
             input_title,
-            "type input here…",
+            "Empty input",
         );
         Self::render_pane(
             buf,
             &mut self.exp_content,
             &self.expected_box,
-            " [Expected] ",
+            " Expected ",
             expected_active,
             is_editing,
             expected_border,
             expected_title,
-            "no expected output",
+            "Empty output",
         );
 
         let got_width = inner_width(self.got_box.rect);
@@ -700,14 +716,18 @@ impl TestCase {
             .map(|line| clip_line(line, got_width))
             .collect();
         let got_border = verdict_border;
-        let got_title = theme::TITLE();
+        let got_title = if matches!(self.verdict, CaseVerdict::Pending) {
+            theme::MUTED()
+        } else {
+            verdict_color
+        };
         let got_panel = Paragraph::new(Text::from(got_lines))
-            .style(Style::new().fg(theme::TEXT()))
+            .style(Style::new().fg(theme::TEXT()).bg(theme::SURFACE()))
             .block(
-                block(Some(" [Got] "))
+                block(Some(" Actual "))
                     .border_style(got_border)
                     .title_style(Style::new().fg(got_title).bold())
-                    .title_alignment(Right),
+                    .title_alignment(Left),
             );
         got_panel.render(self.got_box.rect, buf);
     }
@@ -735,15 +755,15 @@ impl TestCase {
     fn got_view(&self) -> Vec<Line<'static>> {
         let Some(got) = &self.got_content else {
             return vec![Line::from(Span::styled(
-                "run tests [r] to see the output",
-                Style::new().fg(theme::MUTED()).italic(),
+                "Press r to run",
+                Style::new().fg(theme::MUTED()),
             ))];
         };
 
         if got.is_empty() {
             return vec![Line::from(Span::styled(
-                "(no output)",
-                Style::new().fg(theme::MUTED()).italic(),
+                "Empty output",
+                Style::new().fg(theme::MUTED()),
             ))];
         }
 
@@ -812,16 +832,24 @@ impl TestCase {
             Style::new()
         };
 
+        let surface = if is_active {
+            theme::ELEVATED()
+        } else {
+            theme::SURFACE()
+        };
+        let pane_style = Style::new().fg(theme::TEXT()).bg(surface);
         let pane_block = block(Some(title))
+            .style(pane_style)
             .border_style(border_color)
             .title_style(Style::new().fg(title_color).bold())
-            .title_alignment(Right);
+            .title_alignment(Left);
 
         // Only the box being edited is rendered as a TextArea — ratatui-textarea
         // positions the terminal cursor on render, so rendering another TextArea
         // after it would steal the cursor.
         if is_editing && is_active {
-            textarea.set_style(Style::new().fg(theme::TEXT()));
+            textarea.set_style(pane_style);
+            textarea.set_cursor_line_style(Style::default());
             textarea.set_cursor_style(cursor_style);
             textarea.set_block(pane_block);
             textarea.render(state.rect, buf);
@@ -830,8 +858,9 @@ impl TestCase {
             let panel = if text.trim().is_empty() {
                 Paragraph::new(Line::from(Span::styled(
                     placeholder,
-                    Style::new().fg(theme::MUTED()).italic(),
+                    Style::new().fg(theme::MUTED()),
                 )))
+                .style(pane_style)
                 .block(pane_block)
             } else {
                 let width = inner_width(state.rect);
@@ -840,7 +869,7 @@ impl TestCase {
                     .map(|line| clip_line(line, width))
                     .collect();
                 Paragraph::new(Text::from(lines))
-                    .style(Style::new().fg(theme::TEXT()))
+                    .style(pane_style)
                     .block(pane_block)
             };
             panel.render(state.rect, buf);
@@ -1031,7 +1060,10 @@ fn inner_width(rect: Rect) -> usize {
 /// Cuts a rendered line to `max_width` columns, ending with a muted `…` when
 /// the content continues past the pane edge.
 fn clip_line(line: Line<'static>, max_width: usize) -> Line<'static> {
-    if max_width == 0 || line.width() <= max_width {
+    if max_width == 0 {
+        return Line::default();
+    }
+    if line.width() <= max_width {
         return line;
     }
 
@@ -1215,7 +1247,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_focus_marks_the_title_and_keeps_the_verdict_color() {
+    fn delete_focus_marks_the_title_without_obscuring_the_verdict() {
         let mut tc = TestCase::new("1", "2");
         tc.set_result(CaseVerdict::WA { ms: 1 }, "0".into());
         tc.collapsed = false;
@@ -1224,25 +1256,29 @@ mod tests {
         tc.draw_tc(&mut buffer, area, 1, ActiveBox::None, CaseFocus::Delete);
 
         let title: String = (0..area.width).map(|x| buffer[(x, 0)].symbol()).collect();
-        assert!(title.contains('X'), "{title}");
-        let delete_x = title.chars().position(|c| c == 'X').unwrap() as u16;
+        assert!(title.contains("× delete"), "{title}");
+        let delete_x = title.chars().position(|c| c == '×').unwrap() as u16;
         assert_eq!(buffer[(delete_x, 0)].fg, theme::RED());
         let head = title.trim_start();
         assert!(
-            head.starts_with('▼') && head.contains('─'),
-            "the name comes first and the rule follows: {title}"
+            head.starts_with('▾') && head.contains("Case 01") && head.contains("WA"),
+            "case, destructive state, and verdict remain legible: {title}"
         );
-        for pane in [&tc.input_box, &tc.expected_box, &tc.got_box] {
+        for pane in [&tc.input_box, &tc.expected_box] {
             assert_eq!(
                 buffer[(pane.rect.x, pane.rect.y)].fg,
-                theme::RED(),
-                "a WA card keeps its red panes while it is the delete target"
+                theme::BORDER(),
+                "reference content stays quiet while selecting a case"
             );
         }
+        assert_eq!(
+            buffer[(tc.got_box.rect.x, tc.got_box.rect.y)].fg,
+            theme::RED()
+        );
     }
 
     #[test]
-    fn verdict_colors_every_pane() {
+    fn verdict_colors_actual_output_and_keeps_reference_panes_neutral() {
         for (verdict, expected) in [
             (CaseVerdict::Pending, theme::BORDER()),
             (CaseVerdict::AC { ms: 1 }, theme::GREEN()),
@@ -1260,13 +1296,14 @@ mod tests {
             let mut buffer = Buffer::empty(area);
             tc.draw_tc(&mut buffer, area, 1, ActiveBox::None, CaseFocus::None);
 
-            for pane in [&tc.input_box, &tc.expected_box, &tc.got_box] {
+            for pane in [&tc.input_box, &tc.expected_box] {
                 assert_eq!(
                     buffer[(pane.rect.x, pane.rect.y)].fg,
-                    expected,
-                    "{verdict:?} colors every pane"
+                    theme::BORDER(),
+                    "{verdict:?} must not make reference content look erroneous"
                 );
             }
+            assert_eq!(buffer[(tc.got_box.rect.x, tc.got_box.rect.y)].fg, expected);
         }
     }
 
@@ -1290,8 +1327,8 @@ mod tests {
         );
         assert_eq!(
             buffer[(tc.expected_box.rect.x, tc.expected_box.rect.y)].fg,
-            theme::RED(),
-            "the other editable pane keeps its verdict color while editing"
+            theme::BORDER(),
+            "the other editable pane stays neutral while editing"
         );
         assert_eq!(
             buffer[(tc.got_box.rect.x, tc.got_box.rect.y)].fg,
@@ -1312,6 +1349,43 @@ mod tests {
             theme::TEXT(),
             "the case name stays plain text"
         );
+    }
+
+    #[test]
+    fn cards_keep_labels_and_verdicts_visible_on_compact_terminals() {
+        for width in [32, 40, 60, 100] {
+            let mut tc = TestCase::new("1 2", "3");
+            tc.set_result(CaseVerdict::WA { ms: 12 }, "4".into());
+            let area = Rect::new(0, 0, width, tc.row_height() as u16);
+            let mut buffer = Buffer::empty(area);
+            tc.draw_tc(&mut buffer, area, 1, ActiveBox::None, CaseFocus::None);
+            let row = |y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            };
+            assert!(row(0).contains("Case 01"), "{}", row(0));
+            assert!(row(0).contains("WA · 12 ms"), "{}", row(0));
+            assert!(row(tc.input_box.rect.y).contains("Input"));
+            assert!(row(tc.expected_box.rect.y).contains("Expected"));
+            assert!(row(tc.got_box.rect.y).contains("Actual"));
+        }
+    }
+
+    #[test]
+    fn tiny_cards_clear_stale_hit_targets_and_render_without_panicking() {
+        let mut tc = TestCase::new("123", "456");
+        for width in 0..16 {
+            for height in 0..8 {
+                let area = Rect::new(0, 0, width, height);
+                let mut buffer = Buffer::empty(area);
+                tc.draw_tc(&mut buffer, area, 1, ActiveBox::Input, CaseFocus::Edit);
+                if area.is_empty() {
+                    assert_eq!(tc.input_box.rect, Rect::default());
+                    assert_eq!(tc.collapse_toggle_area.rect, Rect::default());
+                }
+            }
+        }
     }
 
     #[test]
