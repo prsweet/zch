@@ -12,8 +12,8 @@ A single Rust binary that receives problems from the [Competitive Companion](htt
 
 ## ✨ Features
 
-* 🖥️ **Live TUI dashboard** — directory bar, hairline-separated case list, message console, verdict cards, and a footer that shows the current mode and that mode's keys. Only Normal lists `h`; `h` and `F1` still open the full map (`F1` works while typing).
-* ✔️ **Instant verdicts** — each test case gets a chip (`✔ AC · 4ms`, `✘ WA`, `⏱ TLE`, `✘ RE`, `✘ CE`) and auto-collapses on AC; on WA the **Got** box marks the exact characters that differ in red.
+* 🖥️ **Live TUI dashboard** — a quiet workspace bar, live pass/fail summary, clear Input / Expected / Actual cards, and contextual shortcuts that keep their labels in narrow editor splits. Blue marks focus; verdict colors mark results. The welcome screen gives three next steps and stays still while idle.
+* ✔️ **Instant verdicts** — each test case gets a chip (`✔ AC · 4 ms`, `✘ WA`, `⏱ TLE`, `✘ RE`, `✘ CE`) and auto-collapses on AC; on WA the **Actual** box marks the exact characters that differ in red.
 * 📥 **Auto-parses problems** — payloads are captured on `127.0.0.1:10043`; the file is created from `~/.zch/boilerplate.cpp` with a `// URL:` header, tests live in `~/.zch/.tc/`, and the file opens in Zed automatically.
 * ⚡ **Blazing fast execution** — compiles once and caches the binary by source hash + flags, so unchanged code replays every case instantly with 1ms polling, per-case timing, and hard TLE kills. Live `compiling… → running case i/n` phases show where the time goes.
 * 🤖 **One-key Codeforces submissions** — a confirmation modal shows every detail, then async verdicts stream into the **Submissions bar** (`⠹ submitting · 12s`, then `✔` in green for accepted, yellow for pretest passed, `✘` in red for rejected). Safari tabs are tracked by URL (**INTERRUPTED** / **TIMED OUT** / hard 5-minute timeout handled) and CAPTCHAs raise the window automatically. Everything stays inside the TUI.
@@ -133,20 +133,22 @@ Click the **Competitive Companion** extension on any Codeforces problem page. Th
 | `a` | add a custom test case |
 | `x` | delete a test case: `Tab`/`Shift+Tab` selects, `Enter` confirms |
 | `e` | edit existing test cases |
-| `s` | submit to Codeforces (confirmation modal → Enter submits / Backspace cancels) |
+| `s` | submit to Codeforces (confirmation modal → Enter submits / Esc or Backspace cancels) |
 | `d` | console: `cd <path>` · `ls` · `pwd` (`TAB` completes and cycles, `↑`/`↓` recall history) |
-| `c` | config: language, validated compile-flag tags, and theme (`Tab` moves fields, `←`/`→` switches language or theme) |
+| `c` | config: language, validated compile-flag tags, and theme (`Tab` moves fields; `←`/`→` or clicking a choice switches language or theme) |
 | `Esc` | cancel a running test, if one is in flight |
 | `h` / `F1` | open the key map (`h`, `F1`, or `Esc` closes); `F1` also works while typing |
+| `PgUp` / `PgDn` | scroll the test list in Normal mode |
+| `Home` / `End` | jump to the top / bottom of the test list in Normal mode |
 | `q` | quit |
 
-While editing, `Tab`/`Shift+Tab` switch between **Input** / **Expected**; in edit mode they continue through the other cases, while a newly added case keeps focus inside its own two panes. `F1` opens the key map while typing, and `Esc` saves. Both edit and delete modes expand every case, so nothing is hidden behind a collapsed card. `Tab`/`Shift+Tab` are the only focus-navigation keys; arrow keys never move focus or walk a list. The active pane is kept inside the viewport and scrolls internally when the text is longer, so the cursor never runs off-screen; pane heights do not change when you switch focus. The console keeps a fixed one-line layout for the live status, latest result, or error, so status updates never resize the rest of the UI. The footer shows the active mode badge and that mode's keys; only Normal lists `h`. `h` and `F1` open the full map from every mode, and the overlay closes with `h`, `F1`, or `Esc`. The mouse wheel scrolls the focused textarea, and anywhere else it scrolls the case list. Scrollbars are one cell wide and draggable too: the case list, submissions panel, config flags, and the pane dialog (both axes) support wheel, track click, and smooth thumb drag. A hairline separates the case list from the directory bar above and from the console below. The list reserves a scrollbar column only when it overflows.
+While editing, `Tab`/`Shift+Tab` switch between **Input** / **Expected**; in edit mode they continue through the other cases, while a newly added case keeps focus inside its own two panes. `F1` opens the key map while typing, and `Esc` saves. Both edit and delete modes expand every case, so nothing is hidden behind a collapsed card. `Tab`/`Shift+Tab` are the only focus-navigation keys; arrow keys never move focus or walk a list. The active pane is kept inside the viewport and scrolls internally when the text is longer, so the cursor never runs off-screen; pane heights do not change when you switch focus. The console keeps a fixed one-line layout for the live status, latest result, or error, so status updates never resize the rest of the UI. The footer prioritizes labeled actions for the current mode; narrow panes keep the Escape action visible. Normal mode lists `h` for help. `F1` opens help while typing; `h` also opens it in non-typing modes. Help scrolls with the wheel, arrow keys, or Page Up / Page Down and closes with `h`, `F1`, or `Esc`. The mouse wheel scrolls the focused textarea, and anywhere else it scrolls the case list. Scrollbars are one cell wide and draggable too: the case list, submissions panel, config flags, and the pane dialog (both axes) support wheel, track click, and smooth thumb drag. A stable summary above the case list shows failed, passed, and pending counts, plus language and time limit when space allows. A hairline separates the list from the status panel below. The list reserves a scrollbar column only when it overflows.
 
 `r` also works for a file with no stored cases: it adds one in-memory smoke case (empty input/expected) so you still get a compile + crash check. Only one run can be active; `Esc`, editing, deleting, or receiving a new problem cancels it and kills the whole child process group instead of leaving it running in the background.
 
 In the config menu (`c`), extra flags are **tags**, not one free-form line: type a flag and press `Enter` to add it. Tags are checked (they must start with `-`, duplicates and unknown `-std=` versions such as `-std=c++1000` are rejected) and stored per language in `~/.zch/config.json`, so switching the language switches the flag list with it. A value that belongs to a flag (`-include-pch /path/to.pch`) is added as its own tag right after that flag. The list shows one tag per line — up to eight at once, with a draggable scrollbar. Before `x` the list is read-only; `x` starts the select → `Enter` → confirm → `Enter` flow and `Tab`/`Shift+Tab` walks the tags. Deleting either half of a `-include-pch` pair removes both halves. No `-std`, `-O2`, or warning flags are added implicitly; the Codeforces language id is derived from the last `-std=` tag (C++17 → 54, C++20 → 89, C++23 → 91). `Tab` once more reaches **Theme**. `←`/`→` switch between Mocha and `prsweet's favourite`, the choice is saved in the same config file, and the palette applies immediately.
 
-Pressing `x` on a test case enters delete mode: every case expands, the focused card keeps its verdict colors and shows a red `X` after the case name, and the other cards dim. `Tab`/`Shift+Tab` walk the list, `Enter` opens a confirmation modal showing the case's input and expected output, and only `Enter` there deletes — `Backspace` goes back, `Esc` cancels. Double-click **Input**, **Expected**, or **Got** to open that pane in a large scrollable dialog with thin, padded, draggable vertical and horizontal scrollbars; safe output keeps its red diff, huge output opens a paged view with a per-page diff, and `Esc` closes it. The final run summary reports `compiled in Xms` or `compile skipped` and the runner-measured total wall time, so both compile and run cost are never hidden.
+Pressing `x` on a test case enters delete mode: every case expands, the focused card keeps its verdict visible and shows a red `× delete` marker after the case name, and the other cards dim. `Tab`/`Shift+Tab` walk the list, `Enter` opens a confirmation modal showing the case's input and expected output, and only `Enter` there deletes — `Backspace` goes back, `Esc` cancels. Double-click **Input**, **Expected**, or **Actual** to open that pane in a large scrollable dialog with thin, padded, draggable vertical and horizontal scrollbars; safe output keeps its red diff, huge output opens a paged view with a per-page diff, and `Esc` closes it. The final run summary reports `compiled in Xms` or `compile skipped` and the runner-measured total wall time, so both compile and run cost are never hidden.
 
 Outside edit mode panes truncate instead of scrolling: raw output is cut to a ~24 KB preview as soon as a result arrives, the pane shows at most 300 lines / 24k characters, and huge WA output skips the character diff in favor of a plain preview plus an `… output truncated` / `… diff skipped for large output` note. Lines wider than the pane end in `…`. While editing, the focused pane scrolls internally, and the large pane dialog scrolls with the wheel, `↑`/`↓`/`←`/`→`/`PgUp`/`PgDn`, or by clicking or dragging its vertical or horizontal scrollbar; it keeps the full output (with the full diff for safe WA results) in memory up to 10 MB / 20,000 lines. Anything larger is spilled to a temp file and read page by page, with the diff recomputed for the visible page; only a spill failure falls back to the bounded preview and warning.
 
@@ -181,8 +183,8 @@ src/
   components/           — ratatui widgets
     dir_terminal.rs     — working-directory console (cd/ls/pwd, completion cycling, history)
     tc_list.rs          — scrollable test case list with verdict chips
-    testcase.rs         — one case: input / expected / got, diff highlighting
-    config.rs           — language + validated flag-tag popup
+    testcase.rs         — one case: input / expected / actual, diff highlighting
+    config.rs           — responsive language, flag, and theme settings
     splash.rs           — empty-state screen
   core/
     receiver.rs         — Competitive Companion HTTP listener (:10043) + command API
@@ -193,6 +195,15 @@ src/
 ```
 
 Everything runs on one channel: the UI thread owns all state, and the receiver / runner / submitter workers only exchange `PassingCommand` envelopes with it — no worker holds a handle to another.
+
+To inspect the UI without starting the listener or submitting anything, render the terminal-size and mode checks:
+
+```bash
+ZCH_DUMP=1 cargo test renders_supported_sizes_and_modes -- --nocapture
+```
+
+Set `ZCH_PREVIEW_DIR=/tmp/zch-preview` on the same command to also export styled HTML from the actual terminal cells. The checks cover welcome, verdicts, editing, settings, and deletion at widths from 120 columns down to tiny resize states.
+
 
 ---
 
