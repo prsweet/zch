@@ -201,6 +201,9 @@ pub mod theme {
 
     #[derive(Clone, Copy)]
     struct Palette {
+        base: Color,
+        surface: Color,
+        elevated: Color,
         border: Color,
         muted: Color,
         text: Color,
@@ -217,8 +220,11 @@ pub mod theme {
 
     /// Catppuccin Mocha. Status colors sit in one lightness band on a dark ground.
     const MOCHA: Palette = Palette {
+        base: Color::Rgb(0x18, 0x18, 0x25),
+        surface: Color::Rgb(0x1e, 0x1e, 0x2e),
+        elevated: Color::Rgb(0x31, 0x32, 0x44),
         border: Color::Rgb(0x45, 0x47, 0x5a),
-        muted: Color::Rgb(0x7f, 0x84, 0x9c),
+        muted: Color::Rgb(0x93, 0x99, 0xb2),
         text: Color::Rgb(0xcd, 0xd6, 0xf4),
         accent: Color::Rgb(0x89, 0xb4, 0xfa),
         green: Color::Rgb(0xa6, 0xe3, 0xa1),
@@ -227,14 +233,17 @@ pub mod theme {
         orange: Color::Rgb(0xfa, 0xb3, 0x87),
         purple: Color::Rgb(0xcb, 0xa6, 0xf7),
         cyan: Color::Rgb(0x94, 0xe2, 0xd5),
-        title: Color::Rgb(0x7f, 0x84, 0x9c),
+        title: Color::Rgb(0xa6, 0xad, 0xc8),
     };
 
     /// Raw syntax colors from the prsweet Zed theme, the same ones in the editor:
     /// pink keywords, lime types, teal functions, gold strings, cyan operators.
     const PRSWEET: Palette = Palette {
+        base: Color::Rgb(0x15, 0x19, 0x23),
+        surface: Color::Rgb(0x1c, 0x21, 0x2e),
+        elevated: Color::Rgb(0x2a, 0x32, 0x42),
         border: Color::Rgb(0x3a, 0x41, 0x50),
-        muted: Color::Rgb(0x8b, 0x93, 0xa7),
+        muted: Color::Rgb(0x9c, 0xa5, 0xb8),
         text: Color::Rgb(0xe8, 0xee, 0xfc),
         accent: Color::Rgb(0x7d, 0xcf, 0xff),
         green: Color::Rgb(0x9e, 0xce, 0x6a),
@@ -243,7 +252,7 @@ pub mod theme {
         orange: Color::Rgb(0xff, 0x9e, 0x64),
         purple: Color::Rgb(0xbb, 0x9a, 0xf7),
         cyan: Color::Rgb(0x4f, 0xd6, 0xbe),
-        title: Color::Rgb(0x4f, 0xd6, 0xbe),
+        title: Color::Rgb(0xb4, 0xbe, 0xd3),
     };
 
     thread_local! {
@@ -261,6 +270,15 @@ pub mod theme {
         })
     }
 
+    pub fn BASE() -> Color {
+        palette().base
+    }
+    pub fn SURFACE() -> Color {
+        palette().surface
+    }
+    pub fn ELEVATED() -> Color {
+        palette().elevated
+    }
     pub fn BORDER() -> Color {
         palette().border
     }
@@ -306,6 +324,7 @@ pub mod icons {
 pub fn block(title: Option<&str>) -> Block<'static> {
     let if_title = title.unwrap_or("");
     Block::default()
+        .style(Style::new().fg(theme::TEXT()).bg(theme::SURFACE()))
         .title(if_title.to_string())
         .borders(Borders::ALL)
         .title_style(Style::new().fg(theme::TITLE()).bold())
