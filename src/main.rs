@@ -213,9 +213,7 @@ fn run_app(terminal: &mut DefaultTerminal, helper: &mut Helper) -> color_eyre::R
             }
         }
 
-        if (helper.busy() || helper.tc_list.testcases.is_empty())
-            && last_tick.elapsed() >= Duration::from_millis(110)
-        {
+        if helper.busy() && last_tick.elapsed() >= Duration::from_millis(110) {
             helper.tick();
             last_tick = Instant::now();
             dirty = true;

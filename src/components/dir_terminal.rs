@@ -3,10 +3,10 @@ use std::{fs, path::PathBuf};
 use ratatui::{
     Frame,
     crossterm::event::{KeyCode, KeyEvent},
-    layout::{HorizontalAlignment::Right, Rect},
+    layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Wrap},
+    widgets::Paragraph,
 };
 use ratatui_textarea::TextArea;
 
@@ -80,7 +80,6 @@ impl MessageLanes {
             .or(self.live.as_ref())
             .or(self.hint.as_ref())
     }
-
 }
 
 struct Completion {
@@ -190,45 +189,101 @@ impl DirTerminal {
             ..area
         };
         let dir_block = block(None)
+            .style(Style::new().bg(theme::SURFACE()))
             .border_style(if is_active {
                 theme::ACCENT()
             } else {
-                theme::PURPLE()
+                theme::BORDER()
             })
-            .title_alignment(Right);
+            .title_style(
+                Style::new()
+                    .fg(if is_active {
+                        theme::ACCENT()
+                    } else {
+                        theme::MUTED()
+                    })
+                    .bold(),
+            );
 
         if is_active {
-            let prompt = format!(" {} > ", self.cur_dir.display());
-            self.input_area.set_block(dir_block.title(prompt));
+            let title = if dir_area.width >= 28 {
+                " Directory command "
+            } else {
+                " Command "
+            };
+            let mut dir_block = dir_block.title(title);
+            if dir_area.width >= 44 {
+                let path = fit_directory(
+                    &self.cur_dir.to_string_lossy(),
+                    dir_area.width.saturating_sub(24) as usize,
+                );
+                dir_block = dir_block.title_top(
+                    Line::styled(format!(" {path} "), Style::new().fg(theme::MUTED()))
+                        .right_aligned(),
+                );
+                dir_block = dir_block.title_bottom(
+                    Line::styled(
+                        " Tab complete · ↑↓ history ",
+                        Style::new().fg(theme::MUTED()),
+                    )
+                    .right_aligned(),
+                );
+            }
+            self.input_area
+                .set_style(Style::new().fg(theme::TEXT()).bg(theme::SURFACE()));
+            self.input_area.set_cursor_line_style(Style::default());
+            self.input_area.set_placeholder_text("cd <path> · ls · pwd");
+            self.input_area
+                .set_placeholder_style(Style::new().fg(theme::MUTED()));
+            self.input_area.set_block(dir_block);
             frame.render_widget(&self.input_area, dir_area);
         } else {
-            let dir_panel = Paragraph::new(format!("  {} ", self.cur_dir.display()))
-                .style(Style::new().fg(theme::TEXT()))
-                .block(dir_block.title(" [Working Directory] "))
-                .wrap(Wrap { trim: true });
-            frame.render_widget(dir_panel, dir_area);
+            let width = dir_block.inner(dir_area).width as usize;
+            let path = fit_directory(&self.cur_dir.to_string_lossy(), width);
+            let mut dir_block = dir_block.title(" Workspace ");
+            if dir_area.width >= 32 {
+                dir_block = dir_block.title_top(
+                    Line::styled(" d change directory ", Style::new().fg(theme::MUTED()))
+                        .right_aligned(),
+                );
+            }
+            frame.render_widget(
+                Paragraph::new(path)
+                    .style(Style::new().fg(theme::TEXT()))
+                    .block(dir_block),
+                dir_area,
+            );
         }
     }
 
     pub fn draw_console(&self, frame: &mut Frame, area: Rect) {
-        if area.height < 2 || self.lanes.is_empty() {
+        if area.height < 2 {
             return;
         }
-
         let Some(message) = self.lanes.active() else {
             return;
         };
-        let msg_panel = Paragraph::new(Line::from(Span::styled(
-            message.text.lines().collect::<Vec<_>>().join(" "),
-            Style::new().fg(message.color),
-        )))
-        .block(
-            block(Some(" [Console] "))
-                .border_style(theme::PURPLE())
-                .title_alignment(Right),
-        )
-        .wrap(Wrap { trim: false });
-        frame.render_widget(msg_panel, area);
+        let label = if self.lanes.error.is_some() {
+            " Error "
+        } else if self.lanes.result.is_some() {
+            " Result "
+        } else if self.lanes.live.is_some() {
+            " Activity "
+        } else {
+            " Ready "
+        };
+        let panel = block(Some(label))
+            .style(Style::new().bg(theme::SURFACE()))
+            .border_style(theme::BORDER())
+            .title_style(Style::new().fg(message.color).bold());
+        let width = panel.inner(area).width as usize;
+        let text = fit_message(&message.text, width);
+        frame.render_widget(
+            Paragraph::new(text)
+                .style(Style::new().fg(message.color))
+                .block(panel),
+            area,
+        );
     }
 
     pub fn handle_event(&mut self, key: KeyEvent) -> bool {
@@ -284,7 +339,9 @@ impl DirTerminal {
                     self.clear_error();
                 }
                 Ok(_) => self.set_message(theme::RED(), format!("cd: not a directory: {target}")),
-                Err(_) => self.set_message(theme::RED(), format!("cd: no such directory: {target}")),
+                Err(_) => {
+                    self.set_message(theme::RED(), format!("cd: no such directory: {target}"))
+                }
             }
         } else if cmd == "ls" {
             match fs::read_dir(&self.cur_dir) {
@@ -452,8 +509,86 @@ fn common_extension(matches: &[String]) -> String {
     matches[0].chars().take(shared).collect()
 }
 
+/// A status has one stable row. An ellipsis makes clipping explicit, including
+/// for wide Unicode characters, rather than wrapping into an invisible row.
+fn fit_message(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let text: String = text
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    if Line::from(text.as_str()).width() <= width {
+        return text;
+    }
+    let mut clipped = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let char_width = Span::raw(ch.to_string()).width();
+        if used + char_width > width.saturating_sub(1) {
+            break;
+        }
+        clipped.push(ch);
+        used += char_width;
+    }
+    clipped.push('…');
+    clipped
+}
+
+/// Preserve the meaningful end of a path in the single-line directory bar.
+fn fit_directory(path: &str, width: usize) -> String {
+    let path: String = path
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    if Line::from(path.as_str()).width() <= width {
+        return path;
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut suffix = String::new();
+    for ch in path.chars().rev() {
+        let candidate = format!("…{ch}{suffix}");
+        if Line::from(candidate.as_str()).width() > width {
+            break;
+        }
+        suffix.insert(0, ch);
+    }
+    format!("…{suffix}")
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn status_clipping_is_explicit_and_fits_unicode_cells() {
+        assert_eq!(super::fit_message("done", 4), "done");
+        assert_eq!(super::fit_message("compiling solution", 10), "compiling…");
+        assert_eq!(
+            super::fit_message("first\nsecond\tline", 30),
+            "first second line"
+        );
+        for width in 0..40 {
+            let message =
+                super::fit_message("Error in 用户/solution.cpp: compilation failed", width);
+            assert!(ratatui::text::Line::from(message).width() <= width);
+        }
+    }
+
+    #[test]
+    fn directory_path_fits_and_preserves_the_folder() {
+        assert_eq!(super::fit_directory("/tmp/problems", 40), "/tmp/problems");
+        assert_eq!(
+            super::fit_directory("/Users/someone/projects/contest", 12),
+            "…cts/contest"
+        );
+        for width in 0..40 {
+            let path = super::fit_directory("/Users/用户/competitive/programming/contest", width);
+            assert!(ratatui::text::Line::from(path).width() <= width);
+        }
+    }
+
     use super::*;
     use ratatui::{
         Terminal,

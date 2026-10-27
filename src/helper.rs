@@ -8,16 +8,24 @@ use std::{
 };
 
 use ratatui::{
-    Frame, crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind}, layout::{
-        Alignment, Constraint::{Length, Min, Percentage}, HorizontalAlignment::Right, Layout, Position, Rect,
-    }, style::{Color, Modifier, Style}, text::{Line, Span, Text}, widgets::{Block, Clear, Paragraph, ScrollbarOrientation, ScrollbarState},
+    Frame,
+    crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind},
+    layout::{
+        Alignment,
+        Constraint::{Length, Min, Percentage},
+        Layout, Position, Rect,
+    },
+    style::{Color, Modifier, Style},
+    text::{Line, Span, Text},
+    widgets::{Block, Clear, Paragraph, ScrollbarOrientation, ScrollbarState},
 };
 
 use crate::{
     components::{
-        ScrollbarDrag, block, scrollbar,
+        ScrollbarDrag, block,
         config::ConfigMenu,
         dir_terminal::DirTerminal,
+        scrollbar,
         splash::render,
         step_wrapped,
         tc_list::TestCaseList,
@@ -217,6 +225,7 @@ pub struct Helper {
     pane_dialog: Option<PaneDialog>,
     last_pane_click: Option<(Instant, usize, PaneKind)>,
     show_help: bool,
+    help_scroll: usize,
     adding_case: bool,
 }
 
@@ -224,14 +233,7 @@ impl Helper {
     pub fn new(initial_dir: PathBuf, fs_ops: &FsOps) -> Self {
         let (config, _) = fs_ops.load_config();
         theme::apply(config.theme);
-        let mut dir_terminal = DirTerminal::new(initial_dir);
-        dir_terminal.set_hint(
-            theme::CYAN(),
-            format!(
-                "Ready · listening on 127.0.0.1:{} — send a problem with Competitive Companion",
-                crate::core::receiver::listen_port()
-            ),
-        );
+        let dir_terminal = DirTerminal::new(initial_dir);
 
         Self {
             dir_terminal,
@@ -257,6 +259,7 @@ impl Helper {
             pane_dialog: None,
             last_pane_click: None,
             show_help: false,
+            help_scroll: 0,
             adding_case: false,
         }
     }
@@ -283,9 +286,21 @@ impl Helper {
     pub fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
 
-        let master_border = block(Some(" ZCH "))
-            .border_style(theme::MUTED())
-            .title_style(Style::new().fg(theme::ORANGE()).bold());
+        frame.render_widget(
+            Block::default().style(Style::new().fg(theme::TEXT()).bg(theme::BASE())),
+            area,
+        );
+
+        let title = problem_header(
+            self.active_problem
+                .as_ref()
+                .map(|problem| problem.name.as_str()),
+            area.width.saturating_sub(2) as usize,
+        );
+        let master_border = block(Some(&title))
+            .style(Style::new().fg(theme::TEXT()).bg(theme::BASE()))
+            .border_style(theme::BORDER())
+            .title_style(Style::new().fg(theme::ACCENT()).bold());
         let main_area = master_border.inner(area);
         frame.render_widget(master_border, area);
 
@@ -330,7 +345,7 @@ impl Helper {
             }
         }
 
-        draw_hairline(frame, top_rule);
+        self.draw_test_summary(frame, top_rule);
         draw_hairline(frame, bottom_rule);
         self.draw_submissions(frame, submissions);
         self.dir_terminal.draw_console(frame, console);
@@ -465,7 +480,7 @@ impl Helper {
 
         frame.render_widget(
             Paragraph::new(lines)
-                .block(block(Some(" [Submissions] ")).title_alignment(Right)),
+                .block(block(Some(" Submissions ")).title_alignment(Alignment::Left)),
             list_area,
         );
 
@@ -479,75 +494,202 @@ impl Helper {
         }
     }
 
-    fn draw_footer(&mut self, frame: &mut Frame, area: Rect) {
-        let mut spans: Vec<Span> = Vec::new();
-        let key = |k: &str| Span::styled(format!("[{k}]"), Style::new().fg(theme::ACCENT()).bold());
-        let badge = |text: &str, color: Color| {
+    fn draw_test_summary(&self, frame: &mut Frame, area: Rect) {
+        if self.tc_list.testcases.is_empty() {
+            draw_hairline(frame, area);
+            return;
+        }
+        let total = self.tc_list.testcases.len();
+        let passed = self
+            .tc_list
+            .testcases
+            .iter()
+            .filter(|tc| tc.verdict.is_ac())
+            .count();
+        let failed = self
+            .tc_list
+            .testcases
+            .iter()
+            .filter(|tc| tc.verdict.is_failed())
+            .count();
+        let pending = total - passed - failed;
+        let mut spans = vec![
             Span::styled(
-                format!(" {text} "),
-                Style::new().fg(Color::Black).bg(color).bold(),
-            )
-        };
+                if area.width < 48 {
+                    " TESTS "
+                } else {
+                    " TEST CASES "
+                },
+                Style::new().fg(theme::TEXT()).bold(),
+            ),
+            Span::styled(total.to_string(), Style::new().fg(theme::MUTED())),
+        ];
+        for (count, label, color) in [
+            (failed, "failed", theme::RED()),
+            (passed, "passed", theme::GREEN()),
+            (pending, "pending", theme::MUTED()),
+        ] {
+            if count > 0 {
+                let detail = format!("  {count} {label}");
+                if Line::from(spans.clone()).width() + Line::from(detail.as_str()).width()
+                    <= area.width as usize
+                {
+                    spans.push(Span::styled(detail, Style::new().fg(color)));
+                }
+            }
+        }
+        if let Some(problem) = &self.active_problem {
+            let metadata = format!(
+                "{} · {} ms ",
+                self.config_menu.language.label(),
+                problem.effective_time_limit()
+            );
+            let used = Line::from(spans.clone()).width() + Line::from(metadata.as_str()).width();
+            if used + 3 <= area.width as usize {
+                spans.push(Span::raw(" ".repeat(area.width as usize - used)));
+                spans.push(Span::styled(metadata, Style::new().fg(theme::MUTED())));
+            }
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
 
-        let (mode, color, keys): (String, Color, &[&str]) = match self.input_mode {
+    fn draw_footer(&mut self, frame: &mut Frame, area: Rect) {
+        let (mode, color, mut actions): (String, Color, Vec<(&str, &str)>) = match self.input_mode {
             InputMode::Normal => (
-                "NORMAL".to_string(),
+                "NORMAL".into(),
                 theme::ACCENT(),
-                &["a", "x", "r", "e", "s", "d", "c", "q", "h"],
+                vec![
+                    ("r", "Run"),
+                    ("e", "Edit"),
+                    ("a", "Add"),
+                    ("s", "Submit"),
+                    ("x", "Delete"),
+                    ("d", "Console"),
+                    ("c", "Settings"),
+                    ("q", "Quit"),
+                ],
             ),
             InputMode::Editing => (
                 format!(
-                    "EDITING {} / {}",
+                    "EDITING {}/{}",
                     self.tc_list.active_area + 1,
                     self.tc_list.testcases.len()
                 ),
-                theme::GREEN(),
-                &["Tab/⇧Tab", "Esc"],
+                theme::ACCENT(),
+                vec![("Esc", "Save & exit"), ("Tab/⇧Tab", "Switch pane")],
             ),
             InputMode::DeleteSelect => (
                 format!(
-                    "DELETE CASE {} / {}",
+                    "DELETE {}/{}",
                     self.tc_list.active_area + 1,
                     self.tc_list.testcases.len()
                 ),
                 theme::RED(),
-                &["Tab/⇧Tab", "Enter", "Esc"],
+                vec![
+                    ("Esc", "Cancel"),
+                    ("Enter", "Review"),
+                    ("Tab/⇧Tab", "Select"),
+                ],
             ),
             InputMode::ConfirmDelete => (
-                "CONFIRM DELETE".to_string(),
+                "DELETE".into(),
                 theme::RED(),
-                &["Enter", "Backspace"],
+                vec![("Enter", "Delete"), ("Esc", "Back")],
             ),
-            InputMode::Directory => {
-                ("CONSOLE".to_string(), theme::CYAN(), &["Tab", "Esc"])
-            }
+            InputMode::Directory => (
+                "CONSOLE".into(),
+                theme::ACCENT(),
+                vec![("Esc", "Close"), ("Tab", "Complete"), ("↑/↓", "History")],
+            ),
             InputMode::Config => (
-                "CONFIG".to_string(),
-                theme::YELLOW(),
-                &["Tab", "←/→", "Enter", "x", "Esc"],
+                "CONFIG".into(),
+                theme::ACCENT(),
+                vec![
+                    ("Esc", "Save & exit"),
+                    ("Tab", "Field"),
+                    ("←/→", "Change"),
+                    ("Enter", "Add flag"),
+                    ("x", "Delete flag"),
+                ],
             ),
             InputMode::ConfirmSubmit => (
-                "CONFIRM SUBMISSION".to_string(),
-                theme::PURPLE(),
-                &["Enter", "Backspace"],
+                "SUBMIT".into(),
+                theme::ACCENT(),
+                vec![("Enter", "Submit"), ("Esc", "Cancel")],
             ),
         };
-
-        spans.push(badge(&mode, color));
-        for key_name in keys {
-            spans.push(Span::raw(" "));
-            spans.push(key(key_name));
-        }
-        if self.running && matches!(self.input_mode, InputMode::Normal) {
-            spans.push(Span::raw(" "));
-            spans.push(key("Esc"));
+        let normal = matches!(self.input_mode, InputMode::Normal);
+        if normal && self.active_problem.is_none() && self.tc_list.testcases.is_empty() {
+            actions = vec![("c", "Settings"), ("d", "Console"), ("q", "Quit")];
         }
 
-        let footer = Paragraph::new(Line::from(spans)).alignment(Alignment::Center);
-        frame.render_widget(footer, area);
+        if !normal && area.width < 40 {
+            let label = if matches!(self.input_mode, InputMode::Editing | InputMode::Config) {
+                "Save"
+            } else {
+                "Back"
+            };
+            let compact_mode = mode.split_whitespace().next().unwrap_or(&mode);
+            let badge = format!(" {compact_mode} ");
+            let mut spans = Vec::new();
+            if Line::from(format!("{badge} [Esc] {label}")).width() <= area.width as usize {
+                spans.push(Span::styled(
+                    badge,
+                    Style::new().fg(color).bg(theme::ELEVATED()).bold(),
+                ));
+            }
+            spans.push(Span::styled(
+                format!(" [Esc] {label}"),
+                Style::new().fg(theme::TEXT()).bold(),
+            ));
+            frame.render_widget(Paragraph::new(Line::from(spans)), area);
+            return;
+        }
+
+        if normal && self.running {
+            actions.insert(0, ("Esc", "Cancel"));
+        }
+        // Preserve labels for the most useful actions at every width. The full
+        // map remains one key away; never collapse into an unexplained alphabet.
+        let help = if normal { " [h] Help" } else { "" };
+        let badge = Span::styled(
+            format!(" {mode} "),
+            Style::new().fg(color).bg(theme::ELEVATED()).bold(),
+        );
+        let mut spans = vec![badge];
+        let mut used = Line::from(spans.clone()).width();
+        let help_width = Line::from(help).width();
+        for (key, label) in actions {
+            let width = Line::from(format!(" [{key}] {label}")).width();
+            if used + width + help_width > area.width as usize {
+                continue;
+            }
+            spans.push(Span::styled(
+                format!(" [{key}]"),
+                Style::new().fg(theme::TEXT()).bold(),
+            ));
+            spans.push(Span::styled(
+                format!(" {label}"),
+                Style::new().fg(theme::MUTED()),
+            ));
+            used += width;
+        }
+        if normal && used + help_width <= area.width as usize {
+            spans.push(Span::styled(
+                " [h]",
+                Style::new().fg(theme::ACCENT()).bold(),
+            ));
+            spans.push(Span::styled(" Help", Style::new().fg(theme::MUTED())));
+        } else if used > area.width as usize {
+            spans = vec![Span::styled(
+                if normal { "[h] Help" } else { "[Esc] Back" },
+                Style::new().fg(theme::ACCENT()),
+            )];
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
-    fn draw_help(&self, frame: &mut Frame, area: Rect) {
+    fn draw_help(&mut self, frame: &mut Frame, area: Rect) {
         let rows: &[(&str, &str)] = match self.input_mode {
             InputMode::Normal => &[
                 ("[a]", "add case"),
@@ -558,6 +700,8 @@ impl Helper {
                 ("[d]", "console"),
                 ("[c]", "config"),
                 ("[q]", "quit"),
+                ("[PgUp/PgDn]", "scroll test cases"),
+                ("[Home/End]", "first / last row"),
             ],
             InputMode::Editing if self.adding_case => &[
                 ("[Tab/⇧Tab]", "switch input / expected"),
@@ -572,10 +716,7 @@ impl Helper {
                 ("[Enter]", "confirm delete"),
                 ("[Esc]", "cancel"),
             ],
-            InputMode::ConfirmDelete => &[
-                ("[Enter]", "delete"),
-                ("[Backspace]", "back"),
-            ],
+            InputMode::ConfirmDelete => &[("[Enter]", "delete"), ("[Backspace]", "back")],
             InputMode::Directory => &[
                 ("cd <path>", "change directory"),
                 ("ls", "list directory"),
@@ -585,69 +726,72 @@ impl Helper {
             ],
             InputMode::Config => &[
                 ("[Tab]", "next field"),
-                ("[←/→]", "language"),
+                ("[←/→]", "change language / theme"),
                 ("[Enter]", "add flag"),
                 ("[x]", "delete flag"),
                 ("[Esc]", "save & close"),
             ],
-            InputMode::ConfirmSubmit => &[
-                ("[Enter]", "submit"),
-                ("[Backspace]", "cancel"),
-            ],
+            InputMode::ConfirmSubmit => &[("[Enter]", "submit"), ("[Esc]", "cancel")],
         };
 
+        let width = 58.min(area.width.saturating_sub(u16::from(area.width >= 40) * 4));
+        let height = (rows.len() as u16 + 5)
+            .min(area.height.saturating_sub(u16::from(area.height >= 18) * 2));
+        let popup = area.centered(Length(width), Length(height));
+        dim_area(frame, area);
+        frame.render_widget(Clear, popup);
+        let border = block(Some(" Keys · Keyboard shortcuts "))
+            .border_style(theme::BORDER())
+            .title_style(Style::new().fg(theme::TEXT()).bold());
+        let inner = border.inner(popup);
+        frame.render_widget(border, popup);
+        let regions = Layout::vertical([Min(0), Length(2)]).split(inner);
         let key_width = rows
             .iter()
-            .map(|(key, _)| key.chars().count())
+            .map(|(key, _)| Line::from(*key).width())
             .max()
             .unwrap_or(0)
             + 2;
-        let description_width = rows
-            .iter()
-            .map(|(_, description)| description.chars().count())
-            .max()
-            .unwrap_or(0);
-        let close = "  [h] / [F1] / [Esc] close";
-        let width = (key_width + description_width + 6)
-            .max(close.chars().count() + 4)
-            .min(area.width.saturating_sub(4) as usize) as u16;
-        let height = (rows.len() as u16 + 4).min(area.height);
-        let popup = Rect {
-            x: area.x + area.width.saturating_sub(width) / 2,
-            y: area.y + area.height.saturating_sub(height) / 2,
-            width,
-            height,
-        };
-
-        dim_area(frame, area);
-        frame.render_widget(Clear, popup);
-        let border = block(Some(" Keys "))
-            .border_style(theme::ACCENT())
-            .title_style(Style::new().fg(theme::ACCENT()).bold())
-            .title_alignment(Alignment::Center);
-        let inner = border.inner(popup);
-        frame.render_widget(border, popup);
-
-        let mut lines = vec![Line::from("")];
+        let mut lines = Vec::new();
         for (key, description) in rows {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {:<width$}", key, width = key_width),
-                    Style::new().fg(theme::ACCENT()).bold(),
-                ),
-                Span::styled(*description, Style::new().fg(theme::TEXT())),
-            ]));
+            if key_width + Line::from(*description).width() <= inner.width as usize {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{key:<key_width$}"),
+                        Style::new().fg(theme::ACCENT()).bold(),
+                    ),
+                    Span::styled(*description, Style::new().fg(theme::TEXT())),
+                ]));
+            } else {
+                lines.push(Line::styled(*key, Style::new().fg(theme::ACCENT()).bold()));
+                lines.push(Line::styled(*description, Style::new().fg(theme::TEXT())));
+            }
         }
-        lines.push(Line::from(vec![
-            Span::styled("  [h]", Style::new().fg(theme::ACCENT()).bold()),
-            Span::styled(" / ", Style::new().fg(theme::MUTED())),
-            Span::styled("[F1]", Style::new().fg(theme::ACCENT()).bold()),
-            Span::styled(" / ", Style::new().fg(theme::MUTED())),
-            Span::styled("[Esc]", Style::new().fg(theme::ACCENT()).bold()),
-            Span::styled(" close", Style::new().fg(theme::MUTED())),
-        ]));
-
-        frame.render_widget(Paragraph::new(lines), inner);
+        let scrolls = lines.len() > regions[0].height as usize;
+        self.help_scroll = self
+            .help_scroll
+            .min(lines.len().saturating_sub(regions[0].height as usize));
+        frame.render_widget(
+            Paragraph::new(lines).scroll((self.help_scroll as u16, 0)),
+            regions[0],
+        );
+        let close = if inner.width < 38 {
+            "[Esc] Close"
+        } else {
+            "[F1] / [Esc] Close"
+        };
+        let hint = if scrolls && inner.width >= 24 {
+            format!("{close}  ↑/↓ Scroll")
+        } else {
+            close.into()
+        };
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::default(),
+                Line::styled(hint, Style::new().fg(theme::MUTED())),
+            ]),
+            regions[1],
+        );
     }
 
     fn draw_submit_modal(&self, frame: &mut Frame, area: Rect) {
@@ -655,78 +799,105 @@ impl Helper {
             return;
         };
         let info = &pending.info;
-
-        let width = 76.min(area.width.saturating_sub(4));
-        let height = 12.min(area.height);
-        let popup = Rect {
-            x: area.x + area.width.saturating_sub(width) / 2,
-            y: area.y + area.height.saturating_sub(height) / 2,
-            width,
-            height,
-        };
-
+        let popup = area.centered(
+            Length(78.min(area.width.saturating_sub(u16::from(area.width >= 42) * 4))),
+            Length(14.min(area.height)),
+        );
         frame.render_widget(Clear, popup);
         let border = block(Some(&format!(" Submit to {} ", info.platform)))
             .border_style(theme::ACCENT())
-            .title_style(Style::new().fg(theme::ACCENT()).bold())
-            .title_alignment(Alignment::Center);
+            .title_style(Style::new().fg(theme::TEXT()).bold());
         let inner = border.inner(popup);
         frame.render_widget(border, popup);
-
+        let regions = Layout::vertical([Min(0), Length(2)]).split(inner);
         let row = |label: &str, value: String, color: Color| -> Line<'static> {
+            let label_width = 12.min(inner.width as usize);
             Line::from(vec![
-                Span::styled(format!("  {label:<12}"), Style::new().fg(theme::MUTED())),
-                Span::styled(value, Style::new().fg(color)),
+                Span::styled(
+                    format!("{label:<label_width$}"),
+                    Style::new().fg(theme::MUTED()),
+                ),
+                Span::styled(
+                    fit_text(&value, inner.width as usize - label_width),
+                    Style::new().fg(color),
+                ),
             ])
         };
-
         let problem_name = self
             .active_problem
             .as_ref()
             .map(|p| p.name.clone())
             .unwrap_or_default();
-        let browser = if info.safari_available {
-            info.browser.to_string()
+        let passed = self
+            .tc_list
+            .testcases
+            .iter()
+            .filter(|tc| tc.verdict.is_ac())
+            .count();
+        let tested = self
+            .tc_list
+            .testcases
+            .iter()
+            .any(|tc| !matches!(tc.verdict, CaseVerdict::Pending));
+        let tests = if tested {
+            format!(
+                "{passed}/{} passed · TL {}ms",
+                pending.test_count, pending.time_limit
+            )
         } else {
-            format!("{} — not installed!", info.browser)
+            format!(
+                "{} cases · not run · TL {}ms",
+                pending.test_count, pending.time_limit
+            )
         };
-        let rows: Vec<Line> = vec![
+        let rows = vec![
             row("Problem", problem_name, theme::TEXT()),
             row("File", info.file_name.clone(), theme::TEXT()),
+            row(
+                "Language",
+                format!("{} (id {})", info.language, info.language_id),
+                theme::TEXT(),
+            ),
+            row(
+                "Local tests",
+                tests,
+                if tested && passed == pending.test_count {
+                    theme::GREEN()
+                } else {
+                    theme::YELLOW()
+                },
+            ),
             row("Platform", info.platform.to_string(), theme::TEXT()),
             row("Problem ID", info.problem_code.clone(), theme::TEXT()),
             row("Submit URL", info.submit_url.clone(), theme::TEXT()),
             row(
-                "Language",
-                format!("{}  (id {})", info.language, info.language_id),
-                theme::TEXT(),
-            ),
-            row(
                 "Browser",
-                browser,
+                if info.safari_available {
+                    info.browser.to_string()
+                } else {
+                    format!("{} — not installed", info.browser)
+                },
                 if info.safari_available {
                     theme::TEXT()
                 } else {
                     theme::RED()
                 },
             ),
-            row(
-                "Local tests",
-                format!("{} cases · TL {}ms", pending.test_count, pending.time_limit),
-                theme::MUTED(),
-            ),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("  [Enter]", Style::new().fg(theme::GREEN()).bold()),
-                Span::styled(" submit      ", Style::new().fg(theme::MUTED())),
-                Span::styled("[Backspace]", Style::new().fg(theme::RED()).bold()),
-                Span::styled(" cancel", Style::new().fg(theme::MUTED())),
-            ]),
         ];
-
-        let body = Paragraph::new(rows)
-            .block(Block::default().padding(ratatui::widgets::Padding::symmetric(1, 0)));
-        frame.render_widget(body, inner);
+        frame.render_widget(Paragraph::new(rows), regions[0]);
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::default(),
+                Line::from(vec![
+                    Span::styled(
+                        " [Enter] Submit ",
+                        Style::new().fg(theme::BASE()).bg(theme::ACCENT()).bold(),
+                    ),
+                    Span::styled("  [Esc] Cancel", Style::new().fg(theme::MUTED())),
+                ]),
+            ]),
+            regions[1],
+        );
     }
 
     fn draw_delete_modal(&self, frame: &mut Frame, area: Rect) {
@@ -734,68 +905,57 @@ impl Helper {
         let Some(tc) = self.tc_list.testcases.get(self.tc_list.active_area) else {
             return;
         };
-
-        let width = 66.min(area.width.saturating_sub(4));
-        let height = 9.min(area.height);
-        let popup = Rect {
-            x: area.x + area.width.saturating_sub(width) / 2,
-            y: area.y + area.height.saturating_sub(height) / 2,
-            width,
-            height,
-        };
-
+        let popup = area.centered(
+            Length(66.min(area.width.saturating_sub(u16::from(area.width >= 42) * 4))),
+            Length(10.min(area.height)),
+        );
         frame.render_widget(Clear, popup);
-        let border = block(Some(" Delete TestCase "))
+        let border = block(Some(" Delete test case "))
             .border_style(theme::RED())
-            .title_style(Style::new().fg(theme::RED()).bold())
-            .title_alignment(Alignment::Center);
+            .title_style(Style::new().fg(theme::RED()).bold());
         let inner = border.inner(popup);
         frame.render_widget(border, popup);
-
-        let preview = |text: &str| -> String {
+        let regions = Layout::vertical([Min(0), Length(2)]).split(inner);
+        let preview = |text: String| -> String {
             let first = text.lines().next().unwrap_or("").trim();
-            if first.is_empty() {
-                return "(empty)".to_string();
-            }
-            let mut short: String = first.chars().take(44).collect();
-            if first.chars().count() > 44 {
-                short.push('…');
-            }
-            short
+            fit_text(
+                if first.is_empty() { "(empty)" } else { first },
+                inner.width.saturating_sub(10) as usize,
+            )
         };
-
-        let input = preview(&tc.inp_content.lines().join("\n"));
-        let expected = preview(&tc.exp_content.lines().join("\n"));
-        let rows: Vec<Line> = vec![
+        let rows = vec![
+            Line::styled(
+                format!("Remove case {} of {total}?", self.tc_list.active_area + 1),
+                Style::new().fg(theme::TEXT()).bold(),
+            ),
+            Line::styled(
+                "This permanently removes the saved case.",
+                Style::new().fg(theme::MUTED()),
+            ),
+            Line::default(),
             Line::from(vec![
-                Span::styled("  Delete ", Style::new().fg(theme::MUTED())),
-                Span::styled(
-                    format!("case {} of {}", self.tc_list.active_area + 1, total),
-                    Style::new().fg(theme::RED()).bold(),
-                ),
-                Span::styled(" for good?", Style::new().fg(theme::MUTED())),
-            ]),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("  input     ", Style::new().fg(theme::MUTED())),
-                Span::styled(input, Style::new().fg(theme::TEXT())),
+                Span::styled("Input     ", Style::new().fg(theme::MUTED())),
+                Span::raw(preview(tc.inp_content.lines().join("\n"))),
             ]),
             Line::from(vec![
-                Span::styled("  expected  ", Style::new().fg(theme::MUTED())),
-                Span::styled(expected, Style::new().fg(theme::TEXT())),
-            ]),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("  [Enter]", Style::new().fg(theme::RED()).bold()),
-                Span::styled(" delete      ", Style::new().fg(theme::MUTED())),
-                Span::styled("[Backspace]", Style::new().fg(theme::GREEN()).bold()),
-                Span::styled(" back", Style::new().fg(theme::MUTED())),
+                Span::styled("Expected  ", Style::new().fg(theme::MUTED())),
+                Span::raw(preview(tc.exp_content.lines().join("\n"))),
             ]),
         ];
-
-        let body = Paragraph::new(rows)
-            .block(Block::default().padding(ratatui::widgets::Padding::symmetric(1, 0)));
-        frame.render_widget(body, inner);
+        frame.render_widget(Paragraph::new(rows), regions[0]);
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::default(),
+                Line::from(vec![
+                    Span::styled(
+                        " [Enter] Delete ",
+                        Style::new().fg(theme::BASE()).bg(theme::RED()).bold(),
+                    ),
+                    Span::styled("  [Esc] Back", Style::new().fg(theme::MUTED())),
+                ]),
+            ]),
+            regions[1],
+        );
     }
 
     // ------------------------------------------------------------------
@@ -1404,10 +1564,10 @@ impl Helper {
             return;
         };
         let (label, color) = match pane {
-            PaneKind::Input => ("Input", theme::CYAN()),
+            PaneKind::Input => ("Input", theme::ACCENT()),
             PaneKind::Expected => ("Expected", theme::TEXT()),
             PaneKind::Got => (
-                "Got",
+                "Actual",
                 if matches!(tc.verdict, CaseVerdict::Pending) {
                     theme::MUTED()
                 } else {
@@ -1445,7 +1605,7 @@ impl Helper {
             DialogContent::Lines(lines)
         };
         self.pane_dialog = Some(PaneDialog {
-            title: format!("{label} · TestCase {}", index + 1),
+            title: format!("{label} · Case {:02}", index + 1),
             case_index: index,
             pane,
             content,
@@ -1668,8 +1828,8 @@ impl Helper {
             .width
             .saturating_sub(u16::from(initial_vscroll) * scrollbar_columns);
         let mut hscroll = content_width > initial_usable_width as usize;
-        let mut content_height = initial_content_height
-            .saturating_sub(u16::from(hscroll) * scrollbar_rows);
+        let mut content_height =
+            initial_content_height.saturating_sub(u16::from(hscroll) * scrollbar_rows);
         let mut vscroll = total_lines > content_height as usize;
         let mut usable_width = inner
             .width
@@ -1803,13 +1963,30 @@ impl Helper {
             return None;
         }
         if self.show_help {
-            if let Event::Key(key) = &event
-                && matches!(
-                    key.code,
-                    KeyCode::Char('h') | KeyCode::F(1) | KeyCode::Esc
-                )
-            {
-                self.show_help = false;
+            match event {
+                Event::Key(key) => match key.code {
+                    KeyCode::Char('h') | KeyCode::F(1) | KeyCode::Esc => {
+                        self.show_help = false;
+                        self.help_scroll = 0;
+                    }
+                    KeyCode::Down => self.help_scroll = self.help_scroll.saturating_add(1),
+                    KeyCode::Up => self.help_scroll = self.help_scroll.saturating_sub(1),
+                    KeyCode::PageDown => self.help_scroll = self.help_scroll.saturating_add(5),
+                    KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(5),
+                    KeyCode::Home => self.help_scroll = 0,
+                    KeyCode::End => self.help_scroll = usize::MAX,
+                    _ => {}
+                },
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::ScrollDown => {
+                        self.help_scroll = self.help_scroll.saturating_add(1)
+                    }
+                    MouseEventKind::ScrollUp => {
+                        self.help_scroll = self.help_scroll.saturating_sub(1)
+                    }
+                    _ => {}
+                },
+                _ => {}
             }
             return None;
         }
@@ -1826,8 +2003,7 @@ impl Helper {
                         self.finish_editing();
                         return None;
                     }
-                    self.tc_list
-                        .handle_key(Event::Key(key), self.adding_case);
+                    self.tc_list.handle_key(Event::Key(key), self.adding_case);
                     self.tc_list.update_scroll();
                 }
                 InputMode::Normal => match key.code {
@@ -1867,7 +2043,8 @@ impl Helper {
                     }
                     KeyCode::Esc => {
                         self.input_mode = InputMode::Normal;
-                        self.dir_terminal.set_hint(theme::MUTED(), "delete cancelled");
+                        self.dir_terminal
+                            .set_hint(theme::MUTED(), "delete cancelled");
                     }
                     KeyCode::Char('h') => self.show_help = true,
                     _ => {}
@@ -1945,6 +2122,11 @@ impl Helper {
                     _ => {}
                 },
             },
+            Event::Mouse(_)
+                if matches!(
+                    self.input_mode,
+                    InputMode::ConfirmDelete | InputMode::ConfirmSubmit
+                ) => {}
             Event::Mouse(mouse) if matches!(self.input_mode, InputMode::Config) => {
                 self.config_menu.handle_mouse(&mouse);
             }
@@ -2021,6 +2203,56 @@ impl Helper {
         }
         None
     }
+}
+
+/// Clip labels by display cells and make truncation explicit.
+fn fit_text(text: &str, width: usize) -> String {
+    let text: String = text
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    if Line::from(text.as_str()).width() <= width {
+        return text;
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut result = String::new();
+    for ch in text.chars() {
+        if Line::from(format!("{result}{ch}…")).width() > width {
+            break;
+        }
+        result.push(ch);
+    }
+    result.push('…');
+    result
+}
+
+/// Bound by terminal cells, including wide characters in problem names.
+fn problem_header(name: Option<&str>, width: usize) -> String {
+    let Some(name) = name else {
+        return " ZCH ".to_string();
+    };
+    if width < 12 {
+        return " ZCH ".to_string();
+    }
+    let name: String = name
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    let title = format!(" ZCH / {name} ");
+    if Line::from(title.as_str()).width() <= width {
+        return title;
+    }
+    let mut clipped = String::from(" ZCH / ");
+    for ch in name.chars() {
+        let candidate = format!("{clipped}{ch}… ");
+        if Line::from(candidate.as_str()).width() > width {
+            break;
+        }
+        clipped.push(ch);
+    }
+    format!("{clipped}… ")
 }
 
 fn draw_hairline(frame: &mut Frame, area: Rect) {
@@ -2304,6 +2536,52 @@ mod tests {
 
     /// `ZCH_DUMP=1 cargo test renders_problem -- --nocapture` to eyeball the UI.
     fn dump_screen(terminal: &Terminal<TestBackend>) {
+        if let Ok(directory) = std::env::var("ZCH_PREVIEW_DIR") {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static INDEX: AtomicUsize = AtomicUsize::new(0);
+            let index = INDEX.fetch_add(1, Ordering::Relaxed);
+            let buffer = terminal.backend().buffer();
+            let color = |color: Color, fallback: &str| match color {
+                Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+                Color::Black => "#000000".into(),
+                _ => fallback.into(),
+            };
+            let mut html = String::from(
+                "<!doctype html><meta charset='utf-8'><title>ZCH interface preview</title><style>body{margin:0;padding:24px;background:#11111b;color:#cdd6f4}pre{width:max-content;font:14px/20px 'SF Mono',Menlo,monospace;letter-spacing:0;background:#181825;padding:16px;border-radius:12px;margin:0}span{font-variant-ligatures:none}</style><pre>",
+            );
+            for y in 0..buffer.area.height {
+                for x in 0..buffer.area.width {
+                    let cell = &buffer[(x, y)];
+                    let fg = color(cell.fg, "#cdd6f4");
+                    let bg = color(cell.bg, "#181825");
+                    let opacity = if cell.modifier.contains(Modifier::DIM) {
+                        ".45"
+                    } else {
+                        "1"
+                    };
+                    let weight = if cell.modifier.contains(Modifier::BOLD) {
+                        "700"
+                    } else {
+                        "400"
+                    };
+                    let symbol = cell
+                        .symbol()
+                        .replace('&', "&amp;")
+                        .replace('<', "&lt;")
+                        .replace('>', "&gt;");
+                    html.push_str(&format!("<span style='color:{fg};background:{bg};opacity:{opacity};font-weight:{weight}'>{symbol}</span>"));
+                }
+                html.push('\n');
+            }
+            html.push_str("</pre>");
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(
+                Path::new(&directory).join(format!("screen-{index:02}.html")),
+                html,
+            )
+            .unwrap();
+        }
+
         if std::env::var("ZCH_DUMP").is_err() {
             return;
         }
@@ -2677,8 +2955,8 @@ mod tests {
         let buffer = terminal.backend().buffer();
         assert_eq!(
             buffer[(0, 0)].fg,
-            theme::MUTED(),
-            "the master border stays muted"
+            theme::BORDER(),
+            "the master border stays quiet"
         );
         assert_eq!(
             buffer[(2, 1)].fg,
@@ -2687,8 +2965,8 @@ mod tests {
         );
         assert_eq!(
             buffer[(3, 2)].bg,
-            Color::Reset,
-            "the command bar must not have a filled background"
+            theme::SURFACE(),
+            "the command bar has a consistent surface"
         );
         let footer = (0..buffer.area.width)
             .map(|x| buffer[(x, buffer.area.height - 2)].symbol())
@@ -2706,13 +2984,27 @@ mod tests {
     }
 
     #[test]
-    fn footer_shows_the_mode_and_keys_only() {
+    fn problem_header_identifies_problem_and_fits_narrow_terminals() {
+        assert_eq!(problem_header(None, 80), " ZCH ");
+        assert_eq!(problem_header(Some("A. Sum"), 80), " ZCH / A. Sum ");
+        for width in [12, 20, 32, 80] {
+            let title =
+                problem_header(Some("A. 非常长的题目名称 with a long problem title"), width);
+            assert!(Line::from(title.as_str()).width() <= width);
+            assert!(title.starts_with(" ZCH / "));
+        }
+        assert!(problem_header(Some("line\nbreak"), 80).contains("line break"));
+    }
+
+    #[test]
+    fn footer_explains_actions_when_space_allows() {
         let root = temp_root("footer_keys");
         let fs_ops = FsOps::with_root(root.clone());
         let work = root.join("problems");
         std::fs::create_dir_all(&work).unwrap();
 
         let mut helper = Helper::new(work, &fs_ops);
+        helper.attach_problem(sample_problem());
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
         terminal.draw(|f| helper.draw(f)).unwrap();
         dump_screen(&terminal);
@@ -2720,19 +3012,22 @@ mod tests {
         let footer = (0..buffer.area.width)
             .map(|x| buffer[(x, buffer.area.height - 2)].symbol())
             .collect::<String>();
-        assert!(footer.contains("NORMAL"), "normal mode has a badge: {footer}");
+        assert!(
+            footer.contains("NORMAL"),
+            "normal mode has a badge: {footer}"
+        );
         assert!(footer.contains("[a]") && footer.contains("[q]"), "{footer}");
         assert!(footer.contains("[h]"), "the help key is visible: {footer}");
         assert!(
-            !footer.contains("add case") && !footer.contains("quit"),
-            "the footer keeps only key strokes: {footer}"
+            footer.contains("[a] Add") && footer.contains("[q] Quit"),
+            "the footer explains its actions: {footer}"
         );
         let x = footer.find("NORMAL").unwrap() as u16;
-        assert_eq!(buffer[(x, buffer.area.height - 2)].fg, Color::Black);
+        assert_eq!(buffer[(x, buffer.area.height - 2)].fg, theme::ACCENT());
         assert_eq!(
             buffer[(x, buffer.area.height - 2)].bg,
-            theme::ACCENT(),
-            "the mode badge stays filled"
+            theme::ELEVATED(),
+            "the mode badge has a quiet fill"
         );
 
         helper.handle_event(key(KeyCode::Char('d')));
@@ -2742,10 +3037,10 @@ mod tests {
             .map(|x| buffer[(x, buffer.area.height - 2)].symbol())
             .collect::<String>();
         let x = footer.find("CONSOLE").unwrap() as u16;
-        assert_eq!(buffer[(x, buffer.area.height - 2)].fg, Color::Black);
+        assert_eq!(buffer[(x, buffer.area.height - 2)].fg, theme::ACCENT());
         assert_eq!(
             buffer[(x, buffer.area.height - 2)].bg,
-            theme::CYAN(),
+            theme::ELEVATED(),
             "mode labels are filled badges"
         );
         assert!(!footer.contains("cd <path>"), "{footer}");
@@ -2761,6 +3056,7 @@ mod tests {
         std::fs::create_dir_all(&work).unwrap();
 
         let mut helper = Helper::new(work, &fs_ops);
+        helper.attach_problem(sample_problem());
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|f| helper.draw(f)).unwrap();
         let buffer = terminal.backend().buffer();
@@ -2768,7 +3064,10 @@ mod tests {
             .map(|x| buffer[(x, buffer.area.height - 2)].symbol())
             .collect::<String>();
         assert!(footer.contains("NORMAL"), "{footer}");
-        assert!(footer.contains("[q]"), "{footer}");
+        assert!(
+            footer.contains("[r] Run") && footer.contains("[e] Edit"),
+            "{footer}"
+        );
         assert!(footer.contains("[h]"), "{footer}");
 
         let _ = std::fs::remove_dir_all(&root);
@@ -2798,7 +3097,10 @@ mod tests {
             .join("\n");
         assert!(screen.contains("Keys"), "{screen}");
         assert!(screen.contains("add case"), "{screen}");
-        assert!(screen.contains("NORMAL"), "the footer keeps the mode: {screen}");
+        assert!(
+            screen.contains("NORMAL"),
+            "the footer keeps the mode: {screen}"
+        );
 
         helper.handle_event(key(KeyCode::Char('h')));
         assert!(!helper.show_help);
@@ -2835,7 +3137,10 @@ mod tests {
         assert!(screen.contains("switch input / expected"), "{screen}");
         assert!(screen.contains("[Tab/⇧Tab]"), "{screen}");
         assert!(screen.contains("[F1]"), "the close hint names F1: {screen}");
-        assert!(screen.contains("EDITING"), "the footer keeps the mode: {screen}");
+        assert!(
+            screen.contains("EDITING"),
+            "the footer keeps the mode: {screen}"
+        );
 
         helper.handle_event(key(KeyCode::F(1)));
         assert!(!helper.show_help);
@@ -2865,7 +3170,10 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(screen.contains("EDITING"), "the footer still shows the mode");
+        assert!(
+            screen.contains("EDITING"),
+            "the footer still shows the mode"
+        );
         assert!(
             !screen.contains("[F1]") && !screen.contains("[h]"),
             "help stays on the normal footer only:\n{screen}"
@@ -2908,7 +3216,7 @@ mod tests {
     }
 
     #[test]
-    fn master_border_has_the_brand_and_a_right_aligned_directory_title() {
+    fn workspace_has_a_quiet_title_and_a_visible_directory_action() {
         let root = temp_root("sticky_header");
         let fs_ops = FsOps::with_root(root.clone());
         let work = root.join("problems");
@@ -2925,23 +3233,21 @@ mod tests {
             .collect::<String>();
         assert!(header.contains("ZCH"), "the brand chip is back: {header}");
         let brand_x = header.find('Z').unwrap() as u16;
-        assert_eq!(buffer[(brand_x, 0)].fg, theme::ORANGE());
+        assert_eq!(buffer[(brand_x, 0)].fg, theme::ACCENT());
 
         let row = (0..buffer.area.width)
             .map(|x| buffer[(x, 1)].symbol())
             .collect::<String>();
-        let title_x = row[..row.find("Working Directory").unwrap()]
-            .chars()
-            .count() as u16;
+        let title_x = row[..row.find("Workspace").unwrap()].chars().count() as u16;
         assert!(
-            title_x > buffer.area.width / 2,
-            "the directory title sits on the right: {row}"
+            title_x < buffer.area.width / 2,
+            "the directory title starts the panel: {row}"
         );
         assert_eq!(buffer[(title_x, 1)].fg, theme::MUTED());
         assert_eq!(
             buffer[(3, 2)].bg,
-            Color::Reset,
-            "the directory bar has no fill"
+            theme::SURFACE(),
+            "the directory bar has a quiet surface"
         );
 
         helper.handle_event(key(KeyCode::Char('d')));
@@ -2951,7 +3257,7 @@ mod tests {
             .map(|x| buffer[(x, 1)].symbol())
             .collect::<String>();
         assert!(
-            !row.contains("Working Directory"),
+            row.contains("Directory command"),
             "the active command bar shows the path prompt instead: {row}"
         );
         assert_eq!(buffer[(2, 1)].fg, theme::ACCENT());
@@ -2960,7 +3266,7 @@ mod tests {
     }
 
     #[test]
-    fn original_sections_are_bordered_without_a_fill() {
+    fn sections_share_consistent_surfaces_and_quiet_borders() {
         let root = temp_root("sticky_bg");
         let fs_ops = FsOps::with_root(root.clone());
         let work = root.join("problems");
@@ -2975,41 +3281,41 @@ mod tests {
         terminal.draw(|f| helper.draw(f)).unwrap();
         let buffer = terminal.backend().buffer();
 
-        assert_eq!(buffer[(0, 0)].fg, theme::MUTED());
+        assert_eq!(buffer[(0, 0)].fg, theme::BORDER());
         assert_eq!(
             buffer[(3, 2)].bg,
-            Color::Reset,
-            "the command bar must not have a filled background"
+            theme::SURFACE(),
+            "the command bar uses the panel surface"
         );
 
         let submissions = helper.submissions_area;
         assert_eq!(buffer[(submissions.x, submissions.y)].fg, theme::BORDER());
         assert_eq!(
             buffer[(submissions.x + 1, submissions.y + 1)].bg,
-            Color::Reset,
-            "the submissions panel uses the terminal background"
+            theme::SURFACE(),
+            "the submissions panel uses the panel surface"
         );
 
         let console_height = helper.dir_terminal.console_height(buffer.area.width - 2);
         assert!(console_height > 0);
         let console_y = buffer.area.height - 2 - console_height;
-        assert_eq!(buffer[(2, console_y)].fg, theme::PURPLE());
+        assert_eq!(buffer[(2, console_y)].fg, theme::BORDER());
         assert_eq!(
             buffer[(3, console_y + 1)].bg,
-            Color::Reset,
-            "the console panel uses the terminal background"
+            theme::SURFACE(),
+            "the console panel uses the panel surface"
         );
         assert_eq!(
             buffer[(1, buffer.area.height - 2)].bg,
-            Color::Reset,
-            "the footer must not have a filled background"
+            theme::BASE(),
+            "the footer rests on the base surface"
         );
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn hairline_separates_the_list_from_the_header_and_the_console() {
+    fn summary_labels_the_list_and_hairline_separates_the_console() {
         let root = temp_root("chrome_hairline");
         let fs_ops = FsOps::with_root(root.clone());
         let work = root.join("problems");
@@ -3025,8 +3331,12 @@ mod tests {
                 .map(|x| buffer[(x, y)].symbol())
                 .collect::<String>()
         };
-        // Master border, then the 3-row directory box, then the hairline.
-        assert!(row(4).chars().all(|c| c == '─'), "top rule: {}", row(4));
+        // The summary occupies one stable row below the workspace.
+        assert!(
+            row(4).contains("TEST CASES 2") && row(4).contains("2 pending"),
+            "summary: {}",
+            row(4)
+        );
         let console_height = helper.dir_terminal.console_height(buffer.area.width);
         let bottom_rule = buffer.area.height - 2 - console_height - 1;
         assert!(
@@ -3034,7 +3344,10 @@ mod tests {
             "bottom rule: {}",
             row(bottom_rule)
         );
-        assert!(!row(5).contains("↑ more"), "the hairline replaces the marker");
+        assert!(
+            !row(5).contains("↑ more"),
+            "the hairline replaces the marker"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -3644,7 +3957,7 @@ mod tests {
             .pane_dialog
             .as_ref()
             .expect("double click opens the dialog");
-        assert!(dialog.title.starts_with("Input · TestCase 1"));
+        assert!(dialog.title.starts_with("Input · Case 01"));
         assert!(
             dialog
                 .visible_lines()
@@ -3969,7 +4282,7 @@ mod tests {
             .pane_dialog
             .as_ref()
             .expect("double click opens the Got dialog");
-        assert!(dialog.title.starts_with("Got · TestCase 1"));
+        assert!(dialog.title.starts_with("Actual · Case 01"));
         assert!(
             dialog
                 .visible_lines()
@@ -4113,5 +4426,104 @@ mod tests {
         assert!(reply.unwrap_err().contains("file not found"));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+    #[test]
+    fn compact_summary_keeps_failures_and_footer_keeps_exit() {
+        let root = temp_root("compact_design");
+        let fs_ops = FsOps::with_root(root.clone());
+        let mut helper = Helper::new(root.clone(), &fs_ops);
+        helper.attach_problem(sample_problem());
+        helper.tc_list.testcases[0].set_result(CaseVerdict::AC { ms: 2 }, "3".into());
+        helper.tc_list.testcases[1].set_result(CaseVerdict::WA { ms: 3 }, "0".into());
+        let mut terminal = Terminal::new(TestBackend::new(32, 18)).unwrap();
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let summary: String = (0..32).map(|x| buffer[(x, 4)].symbol()).collect();
+        assert!(summary.contains("1 failed"), "{summary}");
+        for mode in [
+            InputMode::Editing,
+            InputMode::Config,
+            InputMode::Directory,
+            InputMode::DeleteSelect,
+        ] {
+            helper.input_mode = mode;
+            let mut terminal = Terminal::new(TestBackend::new(20, 1)).unwrap();
+            terminal.draw(|f| helper.draw_footer(f, f.area())).unwrap();
+            let buffer = terminal.backend().buffer();
+            let footer: String = (0..20).map(|x| buffer[(x, 0)].symbol()).collect();
+            assert!(footer.contains("[Esc]"), "{footer}");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn compact_help_scrolls_to_every_action_and_keeps_close_visible() {
+        let root = temp_root("compact_help");
+        let fs_ops = FsOps::with_root(root.clone());
+        let mut helper = Helper::new(root.clone(), &fs_ops);
+        helper.handle_event(key(KeyCode::Char('h')));
+        let mut terminal = Terminal::new(TestBackend::new(32, 10)).unwrap();
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        helper.handle_event(key(KeyCode::End));
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: String = buffer.content.iter().map(|c| c.symbol()).collect();
+        assert!(screen.contains("first / last row"), "{screen}");
+        assert!(screen.contains("[Esc] Close"), "{screen}");
+        helper.handle_event(key(KeyCode::Esc));
+        assert!(!helper.show_help);
+        assert_eq!(helper.help_scroll, 0);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn confirmation_blocks_mouse_events_to_the_underlying_cases() {
+        let root = temp_root("modal_mouse");
+        let fs_ops = FsOps::with_root(root.clone());
+        let mut helper = Helper::new(root.clone(), &fs_ops);
+        helper.attach_problem(sample_problem());
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| helper.draw(f)).unwrap();
+        let target = helper.tc_list.testcases[0].collapse_toggle_area.rect;
+        for mode in [InputMode::ConfirmDelete, InputMode::ConfirmSubmit] {
+            helper.input_mode = mode;
+            helper.handle_event(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: target.x,
+                row: target.y,
+                modifiers: KeyModifiers::NONE,
+            }));
+            assert!(!helper.tc_list.testcases[0].collapsed);
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn renders_supported_sizes_and_modes() {
+        let root = temp_root("design_matrix");
+        let fs_ops = FsOps::with_root(root.clone());
+        let mut helper = Helper::new(PathBuf::from("~/contests/codeforces"), &fs_ops);
+        for (width, height) in [(120, 36), (80, 24), (40, 16), (24, 10), (12, 5), (1, 1)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            helper.active_problem = None;
+            helper.tc_list.clear();
+            helper.input_mode = InputMode::Normal;
+            terminal.draw(|f| helper.draw(f)).unwrap();
+            dump_screen(&terminal);
+            helper.attach_problem(sample_problem());
+            helper.tc_list.testcases[0].set_result(CaseVerdict::AC { ms: 4 }, "3".into());
+            helper.tc_list.testcases[1].set_result(CaseVerdict::WA { ms: 9 }, "11".into());
+            for mode in [
+                InputMode::Normal,
+                InputMode::Editing,
+                InputMode::Config,
+                InputMode::ConfirmDelete,
+            ] {
+                helper.input_mode = mode;
+                terminal.draw(|f| helper.draw(f)).unwrap();
+                dump_screen(&terminal);
+            }
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 }
