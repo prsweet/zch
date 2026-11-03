@@ -8,18 +8,14 @@ use std::{
 use ratatui::{
     buffer::Buffer,
     crossterm::event::{MouseButton, MouseEvent, MouseEventKind},
-    layout::{
-        Constraint::{Length, Percentage},
-        HorizontalAlignment::Right,
-        Layout, Rect,
-    },
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Paragraph, Widget},
+    widgets::{Block, Padding, Paragraph, Widget},
 };
 use ratatui_textarea::TextArea;
 
-use crate::components::{VisualState, block, theme};
+use crate::components::{VisualState, icons, theme, ui};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveBox {
@@ -63,17 +59,6 @@ impl CaseVerdict {
             CaseVerdict::Tle => theme::YELLOW(),
             CaseVerdict::RE => theme::RED(),
             CaseVerdict::CE => theme::ORANGE(),
-        }
-    }
-
-    pub fn chip(&self) -> String {
-        match self {
-            CaseVerdict::Pending => String::new(),
-            CaseVerdict::AC { ms } => format!(" ✔ AC · {ms}ms "),
-            CaseVerdict::WA { ms } => format!(" ✘ WA · {ms}ms "),
-            CaseVerdict::Tle => " ⏱ TLE ".to_string(),
-            CaseVerdict::RE => " ✘ RE ".to_string(),
-            CaseVerdict::CE => " ✘ CE ".to_string(),
         }
     }
 
@@ -358,7 +343,7 @@ impl TestCase {
     }
 
     fn full_height(&self) -> usize {
-        1 + (self.input_lines() + 2) + (self.output_rows() + 2)
+        1 + (self.input_lines() + 2) + 1 + (self.output_rows() + 2) + 1
     }
 
     /// While editing, the active case may not grow taller than the list
@@ -366,7 +351,10 @@ impl TestCase {
     /// which pane has focus, so pressing Tab does not make Input shrink.
     /// Both panes scroll internally when they need more rows.
     pub fn fit_to_height(&mut self, viewport: usize) {
-        let budget = viewport.saturating_sub(5).max(1);
+        // Header, two pane title strips, the gap between panes and the gap
+        // after the card. Content is split across that remainder:
+        // 1 header + (input + 2) + 1 gap + (output + 2) + 1 trailing gap.
+        let budget = viewport.saturating_sub(7).max(1);
         let input_want = self.input_lines_uncapped();
         let output_want = self.output_rows_uncapped();
         let wanted = input_want.saturating_add(output_want);
@@ -587,51 +575,77 @@ impl TestCase {
             width: area.width,
             height: 1,
         };
+        if area.width < 5 || area.height == 0 {
+            self.input_box.rect = Rect::default();
+            self.expected_box.rect = Rect::default();
+            self.got_box.rect = Rect::default();
+            return;
+        }
 
         let verdict_color = self.verdict.color();
-        let verdict_border = if matches!(self.verdict, CaseVerdict::Pending) {
-            theme::BORDER()
-        } else {
-            verdict_color
+        let rail_color = match focus {
+            CaseFocus::Edit => theme::ACCENT(),
+            CaseFocus::Delete => theme::RED(),
+            CaseFocus::None if matches!(self.verdict, CaseVerdict::Pending) => theme::LINE_STRONG(),
+            CaseFocus::None => verdict_color,
         };
-        let toggle = if self.collapsed { "▶" } else { "▼" };
         let title_color = match focus {
             CaseFocus::Edit => theme::ACCENT(),
-            CaseFocus::Delete => theme::TEXT(),
+            CaseFocus::Delete => theme::RED(),
             CaseFocus::None => theme::TEXT(),
         };
-        let mut title = vec![Span::styled(
-            format!(" {toggle} "),
-            Style::new().fg(title_color).bold(),
-        )];
-        title.push(Span::styled(
-            format!("TestCase {index} "),
-            Style::new().fg(title_color).bold(),
-        ));
+
+        let header = Rect { height: 1, ..area };
+        ui::fill_buf(buf, header, theme::BG());
+        buf.set_style(
+            Rect {
+                x: area.x,
+                y: area.y,
+                width: 1,
+                height: 1,
+            },
+            Style::new().bg(rail_color),
+        );
+
+        let mut left = vec![
+            Span::raw(" "),
+            Span::styled(
+                "CASE ",
+                Style::new().fg(theme::MUTED()).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{index:02}"),
+                Style::new().fg(title_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "   {}",
+                    if self.collapsed {
+                        icons::CHEVRON_RIGHT
+                    } else {
+                        icons::CHEVRON_DOWN
+                    }
+                ),
+                Style::new().fg(theme::FAINT()),
+            ),
+        ];
         if focus == CaseFocus::Delete {
-            title.push(Span::styled("X", Style::new().fg(theme::RED()).bold()));
-        }
-        let header = Rect {
-            height: 1,
-            ..area
-        };
-        let chip = self.verdict.chip();
-        let used = title
-            .iter()
-            .map(|span| span.content.chars().count())
-            .sum::<usize>()
-            + chip.chars().count();
-        let gap = (area.width as usize).saturating_sub(used);
-        if gap > 0 {
-            title.push(Span::styled(
-                "─".repeat(gap),
-                Style::new().fg(theme::BORDER()),
+            left.push(Span::styled(
+                "   DELETE",
+                Style::new().fg(theme::RED()).add_modifier(Modifier::BOLD),
             ));
         }
-        if !chip.is_empty() {
-            title.push(Span::styled(chip, Style::new().fg(verdict_color).bold()));
-        }
-        Paragraph::new(Line::from(title)).render(header, buf);
+        let right = self.status_line(area.width < 64);
+        ui::row_buf(
+            buf,
+            Rect {
+                x: area.x + 1,
+                width: area.width - 1,
+                ..header
+            },
+            Line::from(left),
+            right,
+        );
 
         if self.collapsed {
             self.input_box.rect = Rect::default();
@@ -639,77 +653,232 @@ impl TestCase {
             self.got_box.rect = Rect::default();
             return;
         }
-        let inner = Rect {
-            y: area.y + 1,
-            height: area.height.saturating_sub(1),
-            ..area
-        };
+
         let input_height = (self.input_lines() + 2) as u16;
         let output_height = (self.output_rows() + 2) as u16;
-        let v = Layout::vertical([Length(input_height), Length(output_height)]).split(inner);
-        let h = Layout::horizontal([Percentage(50), Percentage(50)]).split(v[1]);
+        let input_rect = Rect {
+            x: area.x,
+            y: area.y + 1,
+            width: area.width,
+            height: input_height,
+        };
+        let output_y = input_rect.y + input_height + 1;
+        let split_gap = 1u16;
+        let left_width = area.width.saturating_sub(split_gap) / 2;
+        let expected_rect = Rect {
+            x: area.x,
+            y: output_y,
+            width: left_width,
+            height: output_height,
+        };
+        let got_rect = Rect {
+            x: area.x + left_width + split_gap,
+            y: output_y,
+            width: area.width.saturating_sub(left_width + split_gap),
+            height: output_height,
+        };
 
-        self.input_box.rect = v[0];
-        self.expected_box.rect = h[0];
-        self.got_box.rect = h[1];
+        self.input_box.rect = input_rect;
+        self.expected_box.rect = expected_rect;
+        self.got_box.rect = got_rect;
 
         let is_editing = focus == CaseFocus::Edit;
         let input_active = matches!(active_box, ActiveBox::Input) && is_editing;
         let expected_active = matches!(active_box, ActiveBox::Expected) && is_editing;
 
-        let input_border = if input_active {
-            theme::ACCENT()
+        let input_meta = if self.input_text().is_empty() {
+            "empty".to_string()
         } else {
-            verdict_border
+            line_count_label(self.inp_content.lines().len())
         };
-        let expected_border = if expected_active {
-            theme::ACCENT()
+        let expected_meta = if self.expected_text().is_empty() {
+            "empty".to_string()
         } else {
-            verdict_border
+            line_count_label(self.exp_content.lines().len())
         };
-        let input_title = theme::TITLE();
-        let expected_title = theme::TITLE();
+        let got_meta = match &self.got_content {
+            None => "not run".to_string(),
+            Some(got) if got.is_empty() => "no output".to_string(),
+            Some(_) => line_count_label(self.got_lines()),
+        };
 
         Self::render_pane(
             buf,
             &mut self.inp_content,
-            &self.input_box,
-            "",
+            input_rect,
+            "Input",
+            &input_meta,
             input_active,
             is_editing,
-            input_border,
-            input_title,
+            if input_active {
+                theme::ACCENT()
+            } else {
+                theme::LINE_STRONG()
+            },
+            if input_active {
+                theme::ACCENT()
+            } else {
+                theme::MUTED()
+            },
+            if input_active {
+                theme::SURFACE_ALT()
+            } else {
+                theme::SURFACE()
+            },
             "type input here…",
         );
         Self::render_pane(
             buf,
             &mut self.exp_content,
-            &self.expected_box,
-            " [Expected] ",
+            expected_rect,
+            "Expected",
+            &expected_meta,
             expected_active,
             is_editing,
-            expected_border,
-            expected_title,
+            if expected_active {
+                theme::ACCENT()
+            } else {
+                theme::LINE_STRONG()
+            },
+            if expected_active {
+                theme::ACCENT()
+            } else {
+                theme::MUTED()
+            },
+            if expected_active {
+                theme::SURFACE_ALT()
+            } else {
+                theme::SURFACE()
+            },
             "no expected output",
         );
 
-        let got_width = inner_width(self.got_box.rect);
+        let got_surface = theme::SURFACE();
+        let got_title = if self.verdict.is_failed() {
+            verdict_color
+        } else {
+            theme::MUTED()
+        };
+        let got_rail = if self.verdict.is_failed() {
+            verdict_color
+        } else {
+            theme::LINE_STRONG()
+        };
+        let content = Self::pane_frame(
+            buf,
+            got_rect,
+            "Got",
+            &got_meta,
+            got_rail,
+            got_title,
+            got_surface,
+        );
+        let got_width = content.width as usize;
         let got_lines: Vec<Line<'static>> = self
             .got_view()
             .into_iter()
             .map(|line| clip_line(line, got_width))
             .collect();
-        let got_border = verdict_border;
-        let got_title = theme::TITLE();
-        let got_panel = Paragraph::new(Text::from(got_lines))
-            .style(Style::new().fg(theme::TEXT()))
-            .block(
-                block(Some(" [Got] "))
-                    .border_style(got_border)
-                    .title_style(Style::new().fg(got_title).bold())
-                    .title_alignment(Right),
-            );
-        got_panel.render(self.got_box.rect, buf);
+        Paragraph::new(Text::from(got_lines))
+            .style(Style::new().fg(theme::TEXT()).bg(got_surface))
+            .render(content, buf);
+    }
+
+    fn status_line(&self, compact: bool) -> Line<'static> {
+        let (glyph, label, color, elapsed) = match self.verdict {
+            CaseVerdict::Pending => return Line::default(),
+            CaseVerdict::AC { ms } => (
+                "✔",
+                if compact { "AC" } else { "ACCEPTED" },
+                theme::GREEN(),
+                Some(ms),
+            ),
+            CaseVerdict::WA { ms } => (
+                "✘",
+                if compact { "WA" } else { "WRONG ANSWER" },
+                theme::RED(),
+                Some(ms),
+            ),
+            CaseVerdict::Tle => (
+                "!",
+                if compact { "TLE" } else { "TIME LIMIT" },
+                theme::YELLOW(),
+                None,
+            ),
+            CaseVerdict::RE => (
+                "✘",
+                if compact { "RE" } else { "RUNTIME ERROR" },
+                theme::RED(),
+                None,
+            ),
+            CaseVerdict::CE => (
+                "✘",
+                if compact { "CE" } else { "COMPILE ERROR" },
+                theme::ORANGE(),
+                None,
+            ),
+        };
+        let mut spans = vec![
+            Span::styled(format!("{glyph} "), Style::new().fg(color).bold()),
+            Span::styled(label.to_string(), Style::new().fg(color).bold()),
+        ];
+        if let Some(ms) = elapsed {
+            spans.push(Span::styled(
+                format!("  {ms} ms"),
+                Style::new().fg(theme::FAINT()),
+            ));
+        }
+        Line::from(spans)
+    }
+
+    /// Paints a pane and its one-row title strip, returning the content area.
+    #[allow(clippy::too_many_arguments)]
+    fn pane_frame(
+        buf: &mut Buffer,
+        rect: Rect,
+        title: &str,
+        meta: &str,
+        rail: Color,
+        title_color: Color,
+        surface: Color,
+    ) -> Rect {
+        if rect.width < 4 || rect.height == 0 {
+            return Rect::default();
+        }
+        ui::fill_buf(buf, rect, surface);
+        buf.set_style(
+            Rect {
+                x: rect.x,
+                y: rect.y,
+                width: 1,
+                height: rect.height,
+            },
+            Style::new().bg(rail),
+        );
+        let title_area = Rect {
+            x: rect.x + 2,
+            y: rect.y,
+            width: rect.width.saturating_sub(3),
+            height: 1,
+        };
+        ui::row_buf(
+            buf,
+            title_area,
+            Line::from(Span::styled(
+                title.to_uppercase(),
+                Style::new().fg(title_color).bold(),
+            )),
+            Line::from(Span::styled(
+                meta.to_string(),
+                Style::new().fg(theme::FAINT()),
+            )),
+        );
+        Rect {
+            x: rect.x + 2,
+            y: rect.y + 1,
+            width: rect.width.saturating_sub(3),
+            height: rect.height.saturating_sub(2),
+        }
     }
 
     fn wa_diff_active(&self) -> bool {
@@ -798,33 +967,33 @@ impl TestCase {
     pub fn render_pane(
         buf: &mut Buffer,
         textarea: &mut TextArea<'static>,
-        state: &VisualState,
+        rect: Rect,
         title: &str,
+        meta: &str,
         is_active: bool,
         is_editing: bool,
-        border_color: Color,
+        rail: Color,
         title_color: Color,
+        surface: Color,
         placeholder: &str,
     ) {
-        let cursor_style = if is_active {
-            Style::new().add_modifier(Modifier::REVERSED)
-        } else {
-            Style::new()
-        };
-
-        let pane_block = block(Some(title))
-            .border_style(border_color)
-            .title_style(Style::new().fg(title_color).bold())
-            .title_alignment(Right);
+        let content = Self::pane_frame(buf, rect, title, meta, rail, title_color, surface);
+        if content.width == 0 || content.height == 0 {
+            return;
+        }
 
         // Only the box being edited is rendered as a TextArea — ratatui-textarea
         // positions the terminal cursor on render, so rendering another TextArea
         // after it would steal the cursor.
         if is_editing && is_active {
-            textarea.set_style(Style::new().fg(theme::TEXT()));
-            textarea.set_cursor_style(cursor_style);
-            textarea.set_block(pane_block);
-            textarea.render(state.rect, buf);
+            textarea.set_style(Style::new().fg(theme::TEXT()).bg(surface));
+            textarea.set_cursor_style(Style::new().add_modifier(Modifier::REVERSED));
+            textarea.set_block(
+                Block::default()
+                    .style(Style::new().bg(surface))
+                    .padding(Padding::new(0, 0, 0, 0)),
+            );
+            textarea.render(content, buf);
         } else {
             let text = textarea.lines().join("\n");
             let panel = if text.trim().is_empty() {
@@ -832,18 +1001,16 @@ impl TestCase {
                     placeholder,
                     Style::new().fg(theme::MUTED()).italic(),
                 )))
-                .block(pane_block)
+                .style(Style::new().bg(surface))
             } else {
-                let width = inner_width(state.rect);
+                let width = content.width as usize;
                 let lines: Vec<Line<'static>> = pane_lines(&text)
                     .into_iter()
                     .map(|line| clip_line(line, width))
                     .collect();
-                Paragraph::new(Text::from(lines))
-                    .style(Style::new().fg(theme::TEXT()))
-                    .block(pane_block)
+                Paragraph::new(Text::from(lines)).style(Style::new().fg(theme::TEXT()).bg(surface))
             };
-            panel.render(state.rect, buf);
+            panel.render(content, buf);
         }
     }
 
@@ -899,6 +1066,10 @@ fn extra_style() -> Style {
 
 fn muted(text: String) -> Line<'static> {
     Line::from(Span::styled(text, Style::new().fg(theme::MUTED()).italic()))
+}
+
+fn line_count_label(count: usize) -> String {
+    format!("{count} line{}", if count == 1 { "" } else { "s" })
 }
 
 fn split_stderr(got: &str) -> (&str, Option<&str>) {
@@ -1021,11 +1192,6 @@ fn pane_lines(text: &str) -> Vec<Line<'static>> {
         lines.push(note);
     }
     lines
-}
-
-/// Columns available inside a bordered pane: borders (2) + horizontal padding (2).
-fn inner_width(rect: Rect) -> usize {
-    rect.width.saturating_sub(4) as usize
 }
 
 /// Cuts a rendered line to `max_width` columns, ending with a muted `…` when
@@ -1181,13 +1347,14 @@ mod tests {
     #[test]
     fn height_tracks_content_and_collapse() {
         let mut tc = TestCase::new("1 2", "3");
-        assert_eq!(tc.row_height(), 7);
+        // Header, Input pane with its title strip, and the Expected/Got row.
+        assert_eq!(tc.row_height(), 9);
 
         tc.inp_content.insert_str("\n4 5");
-        assert_eq!(tc.row_height(), 8);
+        assert_eq!(tc.row_height(), 10);
 
         tc.set_result(CaseVerdict::WA { ms: 1 }, "0\n1\n2".into());
-        assert_eq!(tc.row_height(), 10);
+        assert_eq!(tc.row_height(), 12);
 
         // Collapsing snaps to the padded collapsed height (title + gap row).
         tc.set_result(CaseVerdict::AC { ms: 1 }, "3".into());
@@ -1224,32 +1391,65 @@ mod tests {
         tc.draw_tc(&mut buffer, area, 1, ActiveBox::None, CaseFocus::Delete);
 
         let title: String = (0..area.width).map(|x| buffer[(x, 0)].symbol()).collect();
-        assert!(title.contains('X'), "{title}");
-        let delete_x = title.chars().position(|c| c == 'X').unwrap() as u16;
+        let delete_x = title.find("DELETE").expect("delete label") as u16;
         assert_eq!(buffer[(delete_x, 0)].fg, theme::RED());
-        let head = title.trim_start();
-        assert!(
-            head.starts_with('▼') && head.contains('─'),
-            "the name comes first and the rule follows: {title}"
+        assert!(title.contains("01") && title.contains('▾'), "{title}");
+        assert_eq!(
+            buffer[(area.x, area.y)].bg,
+            theme::RED(),
+            "the card rail turns red for the delete target"
         );
-        for pane in [&tc.input_box, &tc.expected_box, &tc.got_box] {
-            assert_eq!(
-                buffer[(pane.rect.x, pane.rect.y)].fg,
-                theme::RED(),
-                "a WA card keeps its red panes while it is the delete target"
-            );
-        }
+        assert_eq!(
+            buffer[(tc.got_box.rect.x, tc.got_box.rect.y)].bg,
+            theme::RED(),
+            "a WA card keeps its red Got rail while it is the delete target"
+        );
+        assert_eq!(
+            buffer[(tc.input_box.rect.x, tc.input_box.rect.y)].bg,
+            theme::LINE_STRONG(),
+            "the editable panes stay neutral on a focused card"
+        );
     }
 
     #[test]
-    fn verdict_colors_every_pane() {
-        for (verdict, expected) in [
-            (CaseVerdict::Pending, theme::BORDER()),
-            (CaseVerdict::AC { ms: 1 }, theme::GREEN()),
-            (CaseVerdict::WA { ms: 1 }, theme::RED()),
-            (CaseVerdict::Tle, theme::YELLOW()),
-            (CaseVerdict::RE, theme::RED()),
-            (CaseVerdict::CE, theme::ORANGE()),
+    fn verdict_colors_the_card_rail_and_got_rail() {
+        for (verdict, expected, got_rail, label) in [
+            (
+                CaseVerdict::Pending,
+                theme::LINE_STRONG(),
+                theme::LINE_STRONG(),
+                None,
+            ),
+            (
+                CaseVerdict::AC { ms: 1 },
+                theme::GREEN(),
+                theme::LINE_STRONG(),
+                Some("ACCEPTED"),
+            ),
+            (
+                CaseVerdict::WA { ms: 1 },
+                theme::RED(),
+                theme::RED(),
+                Some("WRONG ANSWER"),
+            ),
+            (
+                CaseVerdict::Tle,
+                theme::YELLOW(),
+                theme::YELLOW(),
+                Some("TIME LIMIT"),
+            ),
+            (
+                CaseVerdict::RE,
+                theme::RED(),
+                theme::RED(),
+                Some("RUNTIME ERROR"),
+            ),
+            (
+                CaseVerdict::CE,
+                theme::ORANGE(),
+                theme::ORANGE(),
+                Some("COMPILE ERROR"),
+            ),
         ] {
             let mut tc = TestCase::new("1", "2");
             if !matches!(verdict, CaseVerdict::Pending) {
@@ -1260,12 +1460,33 @@ mod tests {
             let mut buffer = Buffer::empty(area);
             tc.draw_tc(&mut buffer, area, 1, ActiveBox::None, CaseFocus::None);
 
-            for pane in [&tc.input_box, &tc.expected_box, &tc.got_box] {
-                assert_eq!(
-                    buffer[(pane.rect.x, pane.rect.y)].fg,
-                    expected,
-                    "{verdict:?} colors every pane"
-                );
+            assert_eq!(
+                buffer[(area.x, area.y)].bg,
+                expected,
+                "{verdict:?} colors the card rail"
+            );
+            assert_eq!(
+                buffer[(tc.got_box.rect.x, tc.got_box.rect.y)].bg,
+                got_rail,
+                "{verdict:?} colors the Got rail"
+            );
+            assert_eq!(
+                buffer[(tc.input_box.rect.x, tc.input_box.rect.y)].bg,
+                theme::LINE_STRONG(),
+                "the editable panes stay neutral"
+            );
+
+            let title: String = (0..area.width).map(|x| buffer[(x, 0)].symbol()).collect();
+            match label {
+                Some(label) => {
+                    let x = title.find(label).expect("verdict label") as u16;
+                    assert_eq!(
+                        buffer[(x, 0)].fg,
+                        expected,
+                        "{verdict:?} colors its status label"
+                    );
+                }
+                None => assert!(!title.contains("ACCEPTED")),
             }
         }
     }
@@ -1278,26 +1499,35 @@ mod tests {
         let mut buffer = Buffer::empty(area);
         tc.draw_tc(&mut buffer, area, 1, ActiveBox::Input, CaseFocus::Edit);
 
+        let title: String = (0..area.width).map(|x| buffer[(x, 0)].symbol()).collect();
+        let index_x = title.find("01").expect("case number") as u16;
         assert_eq!(
-            buffer[(2, 0)].fg,
+            buffer[(index_x, 0)].fg,
             theme::ACCENT(),
-            "the active case title is accent blue"
+            "the active case number is accent blue"
         );
         assert_eq!(
-            buffer[(tc.input_box.rect.x, tc.input_box.rect.y)].fg,
+            buffer[(area.x, area.y)].bg,
             theme::ACCENT(),
-            "the focused pane is accent blue"
+            "the focused card rail is accent blue"
         );
         assert_eq!(
-            buffer[(tc.expected_box.rect.x, tc.expected_box.rect.y)].fg,
-            theme::RED(),
-            "the other editable pane keeps its verdict color while editing"
+            buffer[(tc.input_box.rect.x, tc.input_box.rect.y)].bg,
+            theme::ACCENT(),
+            "the focused pane rail is accent blue"
         );
         assert_eq!(
-            buffer[(tc.got_box.rect.x, tc.got_box.rect.y)].fg,
+            buffer[(tc.expected_box.rect.x, tc.expected_box.rect.y)].bg,
+            theme::LINE_STRONG(),
+            "the other editable pane keeps a neutral rail"
+        );
+        assert_eq!(
+            buffer[(tc.got_box.rect.x, tc.got_box.rect.y)].bg,
             theme::RED(),
             "the Got pane keeps its verdict color"
         );
+        let status_x = title.find("WRONG ANSWER").expect("verdict label") as u16;
+        assert_eq!(buffer[(status_x, 0)].fg, theme::RED());
     }
 
     #[test]
@@ -1307,10 +1537,17 @@ mod tests {
         let mut buffer = Buffer::empty(area);
         tc.draw_tc(&mut buffer, area, 1, ActiveBox::None, CaseFocus::None);
 
+        let title: String = (0..area.width).map(|x| buffer[(x, 0)].symbol()).collect();
+        let index_x = title.find("01").expect("case number") as u16;
         assert_eq!(
-            buffer[(2, 0)].fg,
+            buffer[(index_x, 0)].fg,
             theme::TEXT(),
             "the case name stays plain text"
+        );
+        assert_eq!(
+            buffer[(2, 0)].fg,
+            theme::MUTED(),
+            "the CASE kicker stays quiet"
         );
     }
 
@@ -1520,7 +1757,7 @@ mod tests {
             rows < 20,
             "huge output must not inflate the pane: {rows} rows"
         );
-        assert_eq!(tc.row_height(), 1 + 3 + rows + 2);
+        assert_eq!(tc.row_height(), 1 + 3 + 1 + rows + 2 + 1);
         assert!(
             tc.got_view()
                 .last()

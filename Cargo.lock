@@ -2115,6 +2115,7 @@ dependencies = [
  "serde_json",
  "throbber-widgets-tui",
  "tiny_http",
+ "unicode-width",
 ]
 
 [[package]]

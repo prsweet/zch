@@ -1,8 +1,8 @@
 use ratatui::{
     crossterm::event::MouseEvent,
     layout::{Position, Rect},
-    style::{Color, Style},
-    widgets::{Block, BorderType, Borders, Padding, Scrollbar, ScrollbarOrientation},
+    style::Color,
+    widgets::{Scrollbar, ScrollbarOrientation},
 };
 
 pub mod config;
@@ -10,6 +10,7 @@ pub mod dir_terminal;
 pub mod splash;
 pub mod tc_list;
 pub mod testcase;
+pub mod ui;
 
 /// Move a cursor by one, wrapping at both ends.
 pub fn step_wrapped(current: usize, total: usize, backwards: bool) -> usize {
@@ -201,7 +202,12 @@ pub mod theme {
 
     #[derive(Clone, Copy)]
     struct Palette {
+        bg: Color,
+        surface: Color,
+        surface_alt: Color,
         border: Color,
+        line_strong: Color,
+        faint: Color,
         muted: Color,
         text: Color,
         accent: Color,
@@ -211,39 +217,44 @@ pub mod theme {
         orange: Color,
         purple: Color,
         cyan: Color,
-        /// Section titles. Mocha keeps these quiet; prsweet uses the syntax title hue.
-        title: Color,
     }
 
-    /// Catppuccin Mocha. Status colors sit in one lightness band on a dark ground.
+    /// Obsidian canvas, cool graphite surfaces and one clear periwinkle accent.
     const MOCHA: Palette = Palette {
-        border: Color::Rgb(0x45, 0x47, 0x5a),
-        muted: Color::Rgb(0x7f, 0x84, 0x9c),
-        text: Color::Rgb(0xcd, 0xd6, 0xf4),
-        accent: Color::Rgb(0x89, 0xb4, 0xfa),
-        green: Color::Rgb(0xa6, 0xe3, 0xa1),
-        red: Color::Rgb(0xf3, 0x8b, 0xa8),
-        yellow: Color::Rgb(0xf9, 0xe2, 0xaf),
-        orange: Color::Rgb(0xfa, 0xb3, 0x87),
-        purple: Color::Rgb(0xcb, 0xa6, 0xf7),
-        cyan: Color::Rgb(0x94, 0xe2, 0xd5),
-        title: Color::Rgb(0x7f, 0x84, 0x9c),
+        bg: Color::Rgb(0x09, 0x0b, 0x0f),
+        surface: Color::Rgb(0x10, 0x14, 0x1b),
+        surface_alt: Color::Rgb(0x16, 0x1c, 0x26),
+        border: Color::Rgb(0x24, 0x2d, 0x3a),
+        line_strong: Color::Rgb(0x35, 0x42, 0x56),
+        faint: Color::Rgb(0x4a, 0x56, 0x68),
+        muted: Color::Rgb(0x7e, 0x8a, 0x9e),
+        text: Color::Rgb(0xe8, 0xee, 0xf7),
+        accent: Color::Rgb(0x8c, 0xb8, 0xff),
+        green: Color::Rgb(0x8f, 0xe3, 0xa2),
+        red: Color::Rgb(0xff, 0x7d, 0x92),
+        yellow: Color::Rgb(0xf0, 0xcf, 0x7a),
+        orange: Color::Rgb(0xff, 0xa6, 0x6f),
+        purple: Color::Rgb(0xc8, 0xa9, 0xff),
+        cyan: Color::Rgb(0x7f, 0xe0, 0xcd),
     };
 
-    /// Raw syntax colors from the prsweet Zed theme, the same ones in the editor:
-    /// pink keywords, lime types, teal functions, gold strings, cyan operators.
+    /// The editor-adjacent palette: brighter syntax hues on a deeper ground.
     const PRSWEET: Palette = Palette {
-        border: Color::Rgb(0x3a, 0x41, 0x50),
-        muted: Color::Rgb(0x8b, 0x93, 0xa7),
-        text: Color::Rgb(0xe8, 0xee, 0xfc),
-        accent: Color::Rgb(0x7d, 0xcf, 0xff),
-        green: Color::Rgb(0x9e, 0xce, 0x6a),
-        red: Color::Rgb(0xff, 0x4d, 0x6d),
-        yellow: Color::Rgb(0xe0, 0xaf, 0x68),
+        bg: Color::Rgb(0x07, 0x09, 0x0d),
+        surface: Color::Rgb(0x0d, 0x11, 0x18),
+        surface_alt: Color::Rgb(0x13, 0x19, 0x23),
+        border: Color::Rgb(0x26, 0x30, 0x3e),
+        line_strong: Color::Rgb(0x3a, 0x47, 0x59),
+        faint: Color::Rgb(0x53, 0x60, 0x73),
+        muted: Color::Rgb(0x8c, 0x97, 0xa9),
+        text: Color::Rgb(0xf0, 0xf4, 0xfa),
+        accent: Color::Rgb(0x9c, 0xc4, 0xff),
+        green: Color::Rgb(0xa9, 0xd9, 0x7e),
+        red: Color::Rgb(0xff, 0x5c, 0x72),
+        yellow: Color::Rgb(0xe7, 0xbc, 0x74),
         orange: Color::Rgb(0xff, 0x9e, 0x64),
-        purple: Color::Rgb(0xbb, 0x9a, 0xf7),
-        cyan: Color::Rgb(0x4f, 0xd6, 0xbe),
-        title: Color::Rgb(0x4f, 0xd6, 0xbe),
+        purple: Color::Rgb(0xbb, 0xa0, 0xff),
+        cyan: Color::Rgb(0x63, 0xdf, 0xc7),
     };
 
     thread_local! {
@@ -263,6 +274,24 @@ pub mod theme {
 
     pub fn BORDER() -> Color {
         palette().border
+    }
+    pub fn BG() -> Color {
+        palette().bg
+    }
+    pub fn SURFACE() -> Color {
+        palette().surface
+    }
+    pub fn SURFACE_ALT() -> Color {
+        palette().surface_alt
+    }
+    pub fn LINE() -> Color {
+        palette().border
+    }
+    pub fn LINE_STRONG() -> Color {
+        palette().line_strong
+    }
+    pub fn FAINT() -> Color {
+        palette().faint
     }
     pub fn MUTED() -> Color {
         palette().muted
@@ -291,9 +320,6 @@ pub mod theme {
     pub fn CYAN() -> Color {
         palette().cyan
     }
-    pub fn TITLE() -> Color {
-        palette().title
-    }
 }
 
 /// Nerd Font glyphs — private-use codepoints, so every machine with a patched
@@ -301,23 +327,15 @@ pub mod theme {
 pub mod icons {
     pub const FOLDER: &str = "\u{f07b}";
     pub const FILE: &str = "\u{f15b}";
+    pub const CHEVRON_DOWN: &str = "▾";
+    pub const CHEVRON_RIGHT: &str = "▸";
+    pub const POINTER: &str = "❯";
 }
 
-pub fn block(title: Option<&str>) -> Block<'static> {
-    let if_title = title.unwrap_or("");
-    Block::default()
-        .title(if_title.to_string())
-        .borders(Borders::ALL)
-        .title_style(Style::new().fg(theme::TITLE()).bold())
-        .border_style(theme::BORDER())
-        .border_type(BorderType::Rounded)
-        .padding(Padding::symmetric(1, 0))
-}
-
-/// A one-cell scrollbar with light track and heavy thumb glyphs.
+/// A one-cell scrollbar: a quiet track and a solid half-block thumb.
 pub fn scrollbar(orientation: ScrollbarOrientation) -> Scrollbar<'static> {
     let (thumb, track) = if orientation.is_vertical() {
-        ("┃", "│")
+        ("▐", "│")
     } else {
         ("━", "─")
     };

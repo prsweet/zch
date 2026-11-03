@@ -3,19 +3,15 @@ use std::collections::HashMap;
 use ratatui::{
     Frame,
     crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
-    layout::{
-        Constraint::{Length, Percentage},
-        HorizontalAlignment::Center,
-        Layout, Position,
-    },
+    layout::{Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Clear, Paragraph, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, Padding, Paragraph, ScrollbarOrientation, ScrollbarState},
 };
 use ratatui_textarea::TextArea;
 
 use crate::{
-    components::{ScrollbarDrag, block, scroll_to_show, scrollbar, step_wrapped, theme},
+    components::{ScrollbarDrag, scroll_to_show, scrollbar, step_wrapped, theme, ui},
     core::{AppTheme, Language, UserConfig, std_from_flag},
 };
 
@@ -164,211 +160,405 @@ impl ConfigMenu {
         self.ensure_flag_visible_with(self.visible_flag_rows());
     }
 
-    pub fn draw(&mut self, frame: &mut Frame, area: ratatui::layout::Rect) {
-        let max_popup = area.height.saturating_sub(2).max(11);
-        let desired_flags = self.visible_flag_rows() as u16 + 2;
-        let popup_height = (12 + desired_flags).min(max_popup);
-        let flags_height = popup_height.saturating_sub(12).max(2);
-        let popup_area = area.centered(Percentage(64), Length(popup_height));
-        frame.render_widget(Clear, popup_area);
+    pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
+        let desired_flags = self.visible_flag_rows() as u16;
+        let height = (14 + desired_flags)
+            .min(area.height.saturating_sub(2))
+            .max(8);
+        let width = (area.width * 68 / 100).clamp(54, 76);
+        let sheet = ui::sheet(frame, area, "Config", theme::ACCENT(), width, height);
+        let body = sheet.body;
+        if body.height == 0 || body.width < 24 {
+            return;
+        }
 
-        let popup_block = block(Some(" Config "))
-            .border_style(theme::ACCENT())
-            .title_style(Style::new().fg(theme::ACCENT()).bold())
-            .title_alignment(Center);
-        let popup_inner = popup_block.inner(popup_area);
-        frame.render_widget(popup_block, popup_area);
+        let list_height = body.height.saturating_sub(9) as usize;
+        self.ensure_flag_visible_with(list_height.max(1));
 
-        let divisions = Layout::vertical([
-            Length(3),
-            Length(flags_height),
-            Length(3),
-            Length(3),
-            Length(1),
-        ])
-        .split(popup_inner);
-
+        let mut y = body.y;
         let lang_active = self.active_field == 0;
-        let lang_color = if lang_active {
-            theme::GREEN()
-        } else {
-            theme::BORDER()
-        };
-        let lang_panel = Paragraph::new(Line::from(vec![
-            Span::styled(
-                if lang_active { " ◀ " } else { "   " },
-                Style::new().fg(lang_color),
-            ),
-            Span::styled(
-                self.language.label(),
-                Style::new().bold().fg(if lang_active {
-                    theme::GREEN()
-                } else {
-                    Color::Reset
-                }),
-            ),
-            Span::styled(
-                if lang_active { " ▶ " } else { "" },
-                Style::new().fg(lang_color),
-            ),
-        ]))
-        .alignment(Center)
-        .block(
-            block(Some(" Language "))
-                .border_style(lang_color)
-                .title_alignment(Center),
-        );
-        frame.render_widget(lang_panel, divisions[0]);
+        if y < body.bottom() {
+            if lang_active {
+                ui::fill(
+                    frame,
+                    Rect {
+                        x: body.x,
+                        y,
+                        width: 1,
+                        height: 1,
+                    },
+                    theme::ACCENT(),
+                );
+            }
+            let row = Rect {
+                x: body.x + 2,
+                y,
+                width: body.width.saturating_sub(4),
+                height: 1,
+            };
+            let value = if lang_active {
+                Line::from(vec![
+                    Span::styled("‹  ", Style::new().fg(theme::FAINT())),
+                    Span::styled(
+                        self.language.label(),
+                        Style::new().fg(theme::ACCENT()).bold(),
+                    ),
+                    Span::styled("  ›", Style::new().fg(theme::FAINT())),
+                ])
+            } else {
+                Line::from(Span::styled(
+                    self.language.label(),
+                    Style::new().fg(theme::TEXT()),
+                ))
+            };
+            ui::row(
+                frame,
+                row,
+                Line::from(Span::styled(
+                    "Language",
+                    Style::new().fg(if lang_active {
+                        theme::TEXT()
+                    } else {
+                        theme::MUTED()
+                    }),
+                )),
+                value,
+            );
+        }
+        y += 2;
 
         let flags_active = self.active_field == 1;
         let deleting = self.delete_stage != DeleteStage::Off;
-        let flags_color = if deleting {
-            theme::RED()
-        } else if flags_active {
-            theme::GREEN()
-        } else {
-            theme::BORDER()
-        };
-        let list_height = flags_height.saturating_sub(2) as usize;
-        self.ensure_flag_visible_with(list_height);
-
-        let flags_block = block(Some(" Extra compile flags "))
-            .border_style(flags_color)
-            .title_alignment(Center);
-        let flags_inner = flags_block.inner(divisions[1]);
-        self.flags_area = flags_inner;
-        self.flags_scrollbar_area = ratatui::layout::Rect::default();
-        if self.flags.is_empty() {
-            self.flags_scroll_drag = None;
-        }
-        frame.render_widget(flags_block, divisions[1]);
-
-        if self.flags.is_empty() {
-            let empty = Paragraph::new(Line::from(Span::styled(
-                "no flags — type one below and press Enter",
-                Style::new().fg(theme::MUTED()).italic(),
-            )));
-            frame.render_widget(empty, flags_inner);
-        } else {
-            let columns = Layout::horizontal([Percentage(100), Length(1)]).split(flags_inner);
-            let needs_scrollbar = self.flags.len() > list_height;
-            let (list_area, scrollbar_area) = if needs_scrollbar {
-                (columns[0], columns[1])
+        if y < body.bottom() {
+            let color = if deleting {
+                theme::RED()
+            } else if flags_active {
+                theme::ACCENT()
             } else {
-                (flags_inner, ratatui::layout::Rect::default())
+                theme::MUTED()
             };
-            self.flags_scrollbar_area = scrollbar_area;
-            if !needs_scrollbar {
-                self.flags_scroll_drag = None;
-            }
+            ui::row(
+                frame,
+                Rect {
+                    x: body.x + 2,
+                    y,
+                    width: body.width.saturating_sub(4),
+                    height: 1,
+                },
+                Line::from(Span::styled("Extra compile flags", Style::new().fg(color))),
+                Line::from(Span::styled(
+                    if deleting {
+                        "SELECT".to_string()
+                    } else {
+                        self.flags.len().to_string()
+                    },
+                    Style::new().fg(color),
+                )),
+            );
+        }
+        y += 1;
 
-            let end = (self.flag_scroll + list_height).min(self.flags.len());
-            let mut lines: Vec<Line> = Vec::new();
-            for index in self.flag_scroll..end {
-                let selected = index == self.flag_cursor;
-                let style = match (self.delete_stage, selected) {
-                    (DeleteStage::Confirm, true) => {
-                        Style::new().fg(Color::Black).bg(theme::RED()).bold()
-                    }
-                    (DeleteStage::Select, true) => Style::new().fg(theme::RED()).bold(),
-                    (_, true) if flags_active => Style::new().fg(theme::GREEN()).bold(),
-                    (_, true) => Style::new().fg(theme::TEXT()).bold(),
-                    _ => Style::new().fg(theme::TEXT()),
-                };
-                let marker = if selected && deleting { "▸ " } else { "  " };
-                lines.push(Line::from(vec![
-                    Span::styled(marker, style),
-                    Span::styled(self.flags[index].clone(), style),
-                ]));
-            }
-            frame.render_widget(Paragraph::new(lines), list_area);
-
-            if needs_scrollbar {
-                let mut state =
-                    ScrollbarState::new(self.flags.len() - list_height).position(self.flag_scroll);
-                frame.render_stateful_widget(
-                    scrollbar(ScrollbarOrientation::VerticalRight),
-                    scrollbar_area,
-                    &mut state,
+        let list_area = Rect {
+            x: body.x,
+            y,
+            width: body.width,
+            height: list_height as u16,
+        };
+        self.flags_area = list_area;
+        self.flags_scrollbar_area = Rect::default();
+        if list_height > 0 {
+            ui::fill(frame, list_area, theme::SURFACE());
+            let rail_color = if deleting {
+                Some(theme::RED())
+            } else if flags_active {
+                Some(theme::ACCENT())
+            } else {
+                None
+            };
+            if let Some(rail_color) = rail_color {
+                ui::fill(
+                    frame,
+                    Rect {
+                        x: list_area.x,
+                        y: list_area.y,
+                        width: 1,
+                        height: list_area.height,
+                    },
+                    rail_color,
                 );
             }
-        }
 
-        let draft_color = if flags_active && !deleting {
-            theme::GREEN()
+            let content = Rect {
+                x: list_area.x + 2,
+                width: list_area.width.saturating_sub(3),
+                y: list_area.y,
+                height: list_area.height,
+            };
+            if self.flags.is_empty() {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        "No flags yet — add one below.",
+                        Style::new().fg(theme::FAINT()).italic(),
+                    ))
+                    .style(Style::new().bg(theme::SURFACE())),
+                    content,
+                );
+            } else {
+                let needs_scrollbar = self.flags.len() > list_height;
+                let width = content.width.saturating_sub(u16::from(needs_scrollbar));
+                let rows = Rect { width, ..content };
+                let end = (self.flag_scroll + list_height).min(self.flags.len());
+                let mut lines: Vec<Line> = Vec::new();
+                for index in self.flag_scroll..end {
+                    let selected = index == self.flag_cursor;
+                    let style = match (self.delete_stage, selected) {
+                        (DeleteStage::Confirm, true) => {
+                            Style::new().fg(Color::Black).bg(theme::RED()).bold()
+                        }
+                        (DeleteStage::Select, true) => Style::new().fg(theme::RED()).bold(),
+                        (_, true) if flags_active => Style::new().fg(theme::TEXT()).bold(),
+                        _ => Style::new().fg(theme::TEXT()),
+                    };
+                    let marker = if selected && deleting { "▸ " } else { "  " };
+                    lines.push(Line::from(vec![
+                        Span::styled(marker, style),
+                        Span::styled(self.flags[index].clone(), style),
+                    ]));
+                }
+                frame.render_widget(Paragraph::new(lines), rows);
+
+                if needs_scrollbar {
+                    let scrollbar_area = Rect {
+                        x: list_area.right().saturating_sub(1),
+                        y: list_area.y,
+                        width: 1,
+                        height: list_area.height,
+                    };
+                    self.flags_scrollbar_area = scrollbar_area;
+                    let mut state = ScrollbarState::new(self.flags.len() - list_height)
+                        .position(self.flag_scroll);
+                    frame.render_stateful_widget(
+                        scrollbar(ScrollbarOrientation::VerticalRight),
+                        scrollbar_area,
+                        &mut state,
+                    );
+                } else {
+                    self.flags_scroll_drag = None;
+                }
+            }
         } else {
-            theme::BORDER()
-        };
-        self.draft.set_style(Style::new().fg(theme::TEXT()));
-        self.draft.set_block(
-            block(Some(" Add flag "))
-                .border_style(draft_color)
-                .title_alignment(Center),
-        );
-        self.draft.set_cursor_style(if flags_active && !deleting {
-            Style::new().add_modifier(Modifier::REVERSED)
-        } else {
-            Style::new()
-        });
-        frame.render_widget(&self.draft, divisions[2]);
+            self.flags_scroll_drag = None;
+        }
+        y = y.saturating_add(list_area.height);
+
+        y += 1;
+        if y < body.bottom() {
+            ui::row(
+                frame,
+                Rect {
+                    x: body.x + 2,
+                    y,
+                    width: body.width.saturating_sub(4),
+                    height: 1,
+                },
+                Line::from(Span::styled(
+                    "Add flag",
+                    Style::new().fg(if flags_active {
+                        theme::TEXT()
+                    } else {
+                        theme::MUTED()
+                    }),
+                )),
+                Line::from(Span::styled(
+                    "Enter to add",
+                    Style::new().fg(theme::FAINT()),
+                )),
+            );
+        }
+        y += 1;
+
+        if y < body.bottom() {
+            let input_area = Rect {
+                x: body.x,
+                y,
+                width: body.width,
+                height: 1,
+            };
+            ui::fill(frame, input_area, theme::SURFACE());
+            if flags_active && !deleting {
+                ui::fill(
+                    frame,
+                    Rect {
+                        x: input_area.x,
+                        y: input_area.y,
+                        width: 1,
+                        height: 1,
+                    },
+                    theme::ACCENT(),
+                );
+            }
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "+",
+                    Style::new().fg(if flags_active {
+                        theme::ACCENT()
+                    } else {
+                        theme::FAINT()
+                    }),
+                ))
+                .style(Style::new().bg(theme::SURFACE())),
+                Rect {
+                    x: input_area.x + 2,
+                    y: input_area.y,
+                    width: 2,
+                    height: 1,
+                },
+            );
+            let text_area = Rect {
+                x: input_area.x + 4,
+                y: input_area.y,
+                width: input_area.width.saturating_sub(6),
+                height: 1,
+            };
+            let draft_empty = self.draft.is_empty();
+            if !flags_active && draft_empty {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        "e.g. -O2   -std=c++20",
+                        Style::new().fg(theme::FAINT()).italic(),
+                    ))
+                    .style(Style::new().bg(theme::SURFACE())),
+                    text_area,
+                );
+            } else {
+                self.draft
+                    .set_style(Style::new().fg(theme::TEXT()).bg(theme::SURFACE()));
+                self.draft.set_block(
+                    Block::default()
+                        .style(Style::new().bg(theme::SURFACE()))
+                        .padding(Padding::new(0, 0, 0, 0)),
+                );
+                self.draft.set_cursor_style(if flags_active && !deleting {
+                    Style::new().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::new()
+                });
+                frame.render_widget(&self.draft, text_area);
+            }
+        }
+        y += 2;
 
         let theme_active = self.active_field == 2;
-        let theme_color = if theme_active {
-            theme::GREEN()
-        } else {
-            theme::BORDER()
-        };
-        let theme_panel = Paragraph::new(Line::from(vec![
-            Span::styled(
-                if theme_active { " ◀ " } else { "   " },
-                Style::new().fg(theme_color),
-            ),
-            Span::styled(
-                self.theme.label(),
-                Style::new().bold().fg(if theme_active {
-                    theme::GREEN()
-                } else {
-                    Color::Reset
-                }),
-            ),
-            Span::styled(
-                if theme_active { " ▶ " } else { "" },
-                Style::new().fg(theme_color),
-            ),
-        ]))
-        .alignment(Center)
-        .block(
-            block(Some(" Theme "))
-                .border_style(theme_color)
-                .title_alignment(Center),
-        );
-        frame.render_widget(theme_panel, divisions[3]);
-
-        let hint = match &self.error {
-            Some(error) => Line::from(Span::styled(
-                format!(" ✘ {error}"),
-                Style::new().fg(theme::RED()),
-            )),
-            None => match self.delete_stage {
-                DeleteStage::Select => Line::from(Span::styled(
-                    " Tab selects · Enter confirms · Esc cancels",
-                    Style::new().fg(theme::RED()),
+        if y < body.bottom() {
+            if theme_active {
+                ui::fill(
+                    frame,
+                    Rect {
+                        x: body.x,
+                        y,
+                        width: 1,
+                        height: 1,
+                    },
+                    theme::ACCENT(),
+                );
+            }
+            let value = if theme_active {
+                Line::from(vec![
+                    Span::styled("‹  ", Style::new().fg(theme::FAINT())),
+                    Span::styled(self.theme.label(), Style::new().fg(theme::ACCENT()).bold()),
+                    Span::styled("  ›", Style::new().fg(theme::FAINT())),
+                ])
+            } else {
+                Line::from(Span::styled(
+                    self.theme.label(),
+                    Style::new().fg(theme::TEXT()),
+                ))
+            };
+            ui::row(
+                frame,
+                Rect {
+                    x: body.x + 2,
+                    y,
+                    width: body.width.saturating_sub(4),
+                    height: 1,
+                },
+                Line::from(Span::styled(
+                    "Theme",
+                    Style::new().fg(if theme_active {
+                        theme::TEXT()
+                    } else {
+                        theme::MUTED()
+                    }),
                 )),
-                DeleteStage::Confirm => {
-                    let flag = self
-                        .flags
-                        .get(self.flag_cursor)
-                        .map(String::as_str)
-                        .unwrap_or("");
-                    Line::from(Span::styled(
-                        format!(" Enter deletes {flag} · Backspace backs out"),
-                        Style::new().fg(theme::RED()).bold(),
-                    ))
-                }
-                DeleteStage::Off => Line::from(""),
-            },
-        };
-        frame.render_widget(Paragraph::new(hint), divisions[4]);
+                value,
+            );
+        }
+        y += 2;
+
+        if y < body.bottom() {
+            let hint = match &self.error {
+                Some(error) => Line::from(vec![
+                    Span::styled("✘ ", Style::new().fg(theme::RED()).bold()),
+                    Span::styled(
+                        ui::truncate(error, body.width.saturating_sub(3) as usize),
+                        Style::new().fg(theme::RED()),
+                    ),
+                ]),
+                None => match self.delete_stage {
+                    DeleteStage::Select => Line::from(Span::styled(
+                        "Tab selects · Enter confirms · Esc cancels",
+                        Style::new().fg(theme::RED()),
+                    )),
+                    DeleteStage::Confirm => {
+                        let flag = self
+                            .flags
+                            .get(self.flag_cursor)
+                            .map(String::as_str)
+                            .unwrap_or("");
+                        Line::from(Span::styled(
+                            ui::truncate(
+                                &format!("Enter deletes {flag} · Backspace backs out"),
+                                body.width.saturating_sub(1) as usize,
+                            ),
+                            Style::new().fg(theme::RED()).bold(),
+                        ))
+                    }
+                    DeleteStage::Off => Line::from(vec![
+                        Span::styled("CF language id ", Style::new().fg(theme::FAINT())),
+                        Span::styled(
+                            self.language.cf_id(&self.flags),
+                            Style::new().fg(theme::MUTED()),
+                        ),
+                    ]),
+                },
+            };
+            frame.render_widget(
+                Paragraph::new(hint),
+                Rect {
+                    x: body.x,
+                    y,
+                    width: body.width,
+                    height: 1,
+                },
+            );
+        }
+
+        ui::sheet_footer(
+            frame,
+            &sheet,
+            Line::from(vec![
+                ui::key("Tab"),
+                Span::styled(" field  ", Style::new().fg(theme::MUTED())),
+                ui::key("←/→"),
+                Span::styled(" change  ", Style::new().fg(theme::MUTED())),
+                ui::key("Enter"),
+                Span::styled(" add  ", Style::new().fg(theme::MUTED())),
+                ui::key("x"),
+                Span::styled(" delete  ", Style::new().fg(theme::MUTED())),
+                ui::key("Esc"),
+                Span::styled(" close", Style::new().fg(theme::MUTED())),
+            ]),
+        );
     }
 
     /// Mouse wheel and scrollbar dragging. Returns true when the event was

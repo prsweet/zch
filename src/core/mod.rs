@@ -192,12 +192,18 @@ impl AppTheme {
     }
 
     pub fn next(self) -> Self {
-        let index = Self::ALL.iter().position(|theme| *theme == self).unwrap_or(0);
+        let index = Self::ALL
+            .iter()
+            .position(|theme| *theme == self)
+            .unwrap_or(0);
         Self::ALL[(index + 1) % Self::ALL.len()]
     }
 
     pub fn prev(self) -> Self {
-        let index = Self::ALL.iter().position(|theme| *theme == self).unwrap_or(0);
+        let index = Self::ALL
+            .iter()
+            .position(|theme| *theme == self)
+            .unwrap_or(0);
         Self::ALL[(index + Self::ALL.len() - 1) % Self::ALL.len()]
     }
 }

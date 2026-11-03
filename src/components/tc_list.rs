@@ -13,6 +13,7 @@ use ratatui::{
 use crate::components::{
     ScrollbarDrag, scrollbar, step_wrapped,
     testcase::{ActiveBox, CaseFocus, PaneKind, TestCase},
+    theme, ui,
 };
 
 pub struct TestCaseList {
@@ -132,13 +133,12 @@ impl TestCaseList {
         let total = self.total_rows();
         let needs_scrollbar = total > self.available_height;
 
-        let (tc_list_area, scrollbar_render_area) =
-            if needs_scrollbar && viewport.width >= 2 {
-                let division = Layout::horizontal([Percentage(100), Length(1)]).split(viewport);
-                (division[0], division[1])
-            } else {
-                (viewport, Rect::default())
-            };
+        let (tc_list_area, scrollbar_render_area) = if needs_scrollbar && viewport.width >= 2 {
+            let division = Layout::horizontal([Percentage(100), Length(1)]).split(viewport);
+            (division[0], division[1])
+        } else {
+            (viewport, Rect::default())
+        };
 
         self.scrollbar_area = scrollbar_render_area;
         if !needs_scrollbar {
@@ -184,6 +184,7 @@ impl TestCaseList {
                 height: tc_height as u16,
             };
             let mut scratch = Buffer::empty(scratch_area);
+            ui::fill_buf(&mut scratch, scratch_area, theme::BG());
             let case_focus = if idx == self.active_area {
                 focus
             } else {
@@ -445,8 +446,8 @@ mod tests {
         let buffer = terminal.backend().buffer();
         for row in area.y..area.y + area.height {
             assert!(
-                matches!(buffer[(area.x, row)].symbol(), "┃" | "│"),
-                "the case-list scrollbar uses thin glyphs"
+                matches!(buffer[(area.x, row)].symbol(), "▐" | "│"),
+                "the case-list scrollbar uses quiet rail glyphs"
             );
         }
         let bottom = area.y + area.height - 2;
@@ -500,5 +501,4 @@ mod tests {
             "the list gives up one column only when the scrollbar appears"
         );
     }
-
 }

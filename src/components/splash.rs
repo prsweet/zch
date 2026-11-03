@@ -6,64 +6,84 @@ use ratatui::{
         Layout, Rect,
     },
     style::{Color, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::Paragraph,
 };
 
-use crate::components::theme;
+use crate::components::{theme, ui};
 
 pub fn render(frame: &mut Frame, area: Rect, spinner: &str, tick: i64, port: u16) {
-    // The gradient breathes slowly (≈13s cycle at the 110ms tick).
+    // The mark breathes slowly (≈13s cycle at the 110ms tick).
     let phase = tick.rem_euclid(120) as f32 / 120.0;
-    let logo = logo_lines(phase);
 
-    let chunks =
-        Layout::vertical([Fill(1), Length(logo.len() as u16), Length(7), Fill(1)]).split(area);
-    frame.render_widget(Paragraph::new(logo).alignment(Alignment::Center), chunks[1]);
+    let mut lines: Vec<Line> = logo_lines(phase);
+    lines.push(Line::default());
+    lines.push(Line::styled(
+        ui::spaced("competitive programming, in flow"),
+        Style::new().fg(theme::MUTED()).bold(),
+    ));
+    lines.push(Line::default());
+    lines.push(Line::styled(
+        "─".repeat(38),
+        Style::new().fg(theme::LINE_STRONG()),
+    ));
+    lines.push(Line::default());
+    lines.push(Line::from(vec![
+        Span::styled(format!("{spinner}  "), Style::new().fg(theme::ACCENT())),
+        ui::dot(theme::GREEN()),
+        Span::styled(" LISTENING", Style::new().fg(theme::MUTED()).bold()),
+        Span::styled(
+            format!("   127.0.0.1:{port}"),
+            Style::new().fg(theme::FAINT()),
+        ),
+    ]));
+    lines.push(Line::styled(
+        "send a problem with Competitive Companion",
+        Style::new().fg(theme::TEXT()),
+    ));
+    lines.push(Line::default());
+    lines.push(Line::from(vec![
+        ui::key("r"),
+        Span::styled(" run    ", Style::new().fg(theme::MUTED())),
+        ui::key("s"),
+        Span::styled(" submit    ", Style::new().fg(theme::MUTED())),
+        ui::key("h"),
+        Span::styled(" keys", Style::new().fg(theme::MUTED())),
+    ]));
+
+    let height = lines.len() as u16;
+    let chunks = Layout::vertical([Fill(1), Length(height), Fill(1)]).split(area);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .alignment(Alignment::Center)
+            .style(Style::new().bg(theme::BG())),
+        chunks[1],
+    );
 
     let version = concat!("v", env!("CARGO_PKG_VERSION"));
-    let lines = vec![
-        Line::styled(
-            "the competitive programming helper",
-            Style::new().fg(theme::TEXT()).bold(),
-        ),
-        Line::default(),
-        Line::styled(
-            "compile · run · submit — right from your editor",
-            Style::new().fg(theme::MUTED()).italic(),
-        ),
-        Line::default(),
-        Line::default(),
-        Line::from(vec![
-            Span::styled(format!("{spinner} "), Style::new().fg(theme::CYAN())),
-            Span::styled(
-                format!("listening on 127.0.0.1:{port}"),
-                Style::new().fg(theme::CYAN()),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(version, Style::new().fg(theme::BORDER())),
-            Span::styled(
-                " — send a problem with Competitive Companion",
-                Style::new().fg(theme::MUTED()),
-            ),
-        ]),
-    ];
-
-    frame.render_widget(
-        Paragraph::new(lines).alignment(Alignment::Center),
-        chunks[2],
-    );
+    if area.width > 40 && area.height > 2 {
+        frame.render_widget(
+            Paragraph::new(Span::styled(version, Style::new().fg(theme::FAINT())))
+                .alignment(Alignment::Right)
+                .style(Style::new().bg(theme::BG())),
+            Rect {
+                x: area.x + ui::GUTTER,
+                width: area.width.saturating_sub(ui::GUTTER * 2),
+                y: area.bottom() - 1,
+                height: 1,
+            },
+        );
+    }
 }
 
-/// ANSI Shadow style "ZCH": fat 3D block letters.
-const LOGO: [&str; 6] = [
-    "███████╗ ██████╗██╗  ██╗",
-    "╚══███╔╝██╔════╝██║  ██║",
-    "  ███╔╝ ██║     ███████║",
-    " ███╔╝  ██║     ██╔══██║",
-    "███████╗╚██████╗██║  ██║",
-    "╚══════╝ ╚═════╝╚═╝  ╚═╝",
+/// A clean five-row slab mark: wide enough to read, quiet enough for a
+/// dashboard that is usually open all day.
+const LOGO: [&str; 5] = [
+    "███████  ██████  ██   ██",
+    "   ███  ██       ██   ██",
+    "  ███   ██       ███████",
+    " ███    ██       ██   ██",
+    "███████  ██████  ██   ██",
 ];
 
 fn logo_lines(phase: f32) -> Vec<Line<'static>> {
@@ -84,13 +104,8 @@ fn logo_lines(phase: f32) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// Vibrant Catppuccin gradient stops: blue → mauve → pink → peach.
-const STOPS: [[u8; 3]; 4] = [
-    [0x89, 0xb4, 0xfa],
-    [0xcb, 0xa6, 0xf7],
-    [0xf5, 0xc2, 0xe7],
-    [0xfa, 0xb3, 0x87],
-];
+/// A cool duotone: periwinkle into soft lilac. No rainbow, no noise.
+const STOPS: [[u8; 3]; 3] = [[0x6f, 0x9e, 0xdd], [0x8c, 0xb8, 0xff], [0xc8, 0xa9, 0xff]];
 
 fn gradient(t: f32) -> Color {
     let t = t.clamp(0.0, 1.0) * (STOPS.len() - 1) as f32;
@@ -107,7 +122,7 @@ fn gradient(t: f32) -> Color {
 
 fn cell_t(col: usize, row: usize, cols: usize, rows: usize, phase: f32) -> f32 {
     let diagonal = 0.55 * row as f32 / (rows - 1) as f32 + 0.45 * col as f32 / (cols - 1) as f32;
-    diagonal + 0.12 * (phase * std::f32::consts::TAU).sin()
+    diagonal + 0.10 * (phase * std::f32::consts::TAU).sin()
 }
 
 #[cfg(test)]
@@ -133,16 +148,19 @@ mod tests {
                 }
                 text.push('\n');
             }
+            if std::env::var("ZCH_DUMP").is_ok() {
+                println!("{width}x{height}\n{text}");
+            }
             assert!(text.contains('█'), "logo missing at {width}x{height}");
-            assert!(text.contains("listening on 127.0.0.1:10043"));
+            assert!(text.contains("LISTENING"));
+            assert!(text.contains("127.0.0.1:10043"));
         }
     }
 
     #[test]
-    fn gradient_runs_through_the_vibrant_stops() {
-        assert_eq!(gradient(0.0), Color::Rgb(0x89, 0xb4, 0xfa));
-        assert_eq!(gradient(1.0), Color::Rgb(0xfa, 0xb3, 0x87));
-        assert_eq!(gradient(0.5), Color::Rgb(0xe0, 0xb4, 0xef));
+    fn gradient_runs_through_the_duotone_stops() {
+        assert_eq!(gradient(0.0), Color::Rgb(0x6f, 0x9e, 0xdd));
+        assert_eq!(gradient(1.0), Color::Rgb(0xc8, 0xa9, 0xff));
         assert_eq!(gradient(-1.0), gradient(0.0), "clamps below");
         assert_eq!(gradient(2.0), gradient(1.0), "clamps above");
     }

@@ -3,17 +3,45 @@ use std::{fs, path::PathBuf};
 use ratatui::{
     Frame,
     crossterm::event::{KeyCode, KeyEvent},
-    layout::{HorizontalAlignment::Right, Rect},
+    layout::Rect,
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Wrap},
+    widgets::{Block, Padding, Paragraph},
 };
 use ratatui_textarea::TextArea;
+use unicode_width::UnicodeWidthStr;
 
-use crate::components::{Message, block, icons, theme};
+use crate::components::{Message, icons, theme, ui};
 
-const CONSOLE_HEIGHT: u16 = 3;
 const HISTORY_LIMIT: usize = 200;
+
+/// Messages may already carry a verdict glyph. Reuse it rather than stacking a
+/// second marker in front of the text.
+const STATUS_GLYPHS: [char; 4] = ['✔', '✘', '⚠', '⏱'];
+
+fn take_status_glyph(text: &str) -> Option<(char, &str)> {
+    let mut chars = text.chars();
+    let glyph = chars.next()?;
+    if !STATUS_GLYPHS.contains(&glyph) {
+        return None;
+    }
+    let rest = chars.as_str();
+    Some((glyph, rest.strip_prefix(' ').unwrap_or(rest)))
+}
+
+fn status_glyph(color: Color) -> char {
+    if color == theme::RED() {
+        '✘'
+    } else if color == theme::GREEN() {
+        '✔'
+    } else if color == theme::YELLOW() {
+        '!'
+    } else if color == theme::CYAN() {
+        '●'
+    } else {
+        '·'
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MessageLane {
@@ -80,7 +108,6 @@ impl MessageLanes {
             .or(self.live.as_ref())
             .or(self.hint.as_ref())
     }
-
 }
 
 struct Completion {
@@ -169,19 +196,16 @@ impl DirTerminal {
         }
     }
 
-    /// Height of the working-directory / command bar.
+    /// Height of the working-directory / command bar. One compact row, so the
+    /// code and test output keep the vertical space.
     pub fn input_height(&self) -> u16 {
-        3
+        1
     }
 
-    /// The console reserves a fixed one-line body whenever it has anything to
-    /// show, so incoming messages never resize the rest of the layout.
+    /// The console is a single fixed status line, so incoming messages never
+    /// resize the rest of the layout.
     pub fn console_height(&self, _width: u16) -> u16 {
-        if self.lanes.is_empty() {
-            0
-        } else {
-            CONSOLE_HEIGHT
-        }
+        if self.lanes.is_empty() { 0 } else { 1 }
     }
 
     pub fn draw_input(&mut self, frame: &mut Frame, area: Rect, is_active: bool) {
@@ -189,46 +213,120 @@ impl DirTerminal {
             height: area.height.min(self.input_height()),
             ..area
         };
-        let dir_block = block(None)
-            .border_style(if is_active {
-                theme::ACCENT()
-            } else {
-                theme::PURPLE()
-            })
-            .title_alignment(Right);
+        if dir_area.height == 0 {
+            return;
+        }
 
         if is_active {
-            let prompt = format!(" {} > ", self.cur_dir.display());
-            self.input_area.set_block(dir_block.title(prompt));
-            frame.render_widget(&self.input_area, dir_area);
+            ui::fill(frame, dir_area, theme::SURFACE_ALT());
+            let prompt_area = Rect {
+                x: dir_area.x + ui::GUTTER,
+                width: 2,
+                height: 1,
+                ..dir_area
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    format!("{} ", icons::POINTER),
+                    Style::new().fg(theme::ACCENT()).bold(),
+                ))
+                .style(Style::new().bg(theme::SURFACE_ALT())),
+                prompt_area,
+            );
+
+            // Keep the current directory visible while the command is typed.
+            let path = self.cur_dir.display().to_string();
+            let path_width = (path.width() + 2).min((dir_area.width / 2) as usize).max(1) as u16;
+            let path_area = Rect {
+                x: dir_area.x + dir_area.width - path_width - ui::GUTTER,
+                width: path_width,
+                height: 1,
+                ..dir_area
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    ui::fit_path(&path, path_width as usize),
+                    Style::new().fg(theme::FAINT()),
+                ))
+                .alignment(ratatui::layout::Alignment::Right)
+                .style(Style::new().bg(theme::SURFACE_ALT())),
+                path_area,
+            );
+
+            let input_x = prompt_area.x + 2;
+            let input_width = path_area.x.saturating_sub(input_x + 1);
+            let input_area = Rect {
+                x: input_x,
+                width: input_width,
+                height: 1,
+                ..dir_area
+            };
+            self.input_area.set_block(
+                Block::default()
+                    .padding(Padding::new(0, 0, 0, 0))
+                    .style(Style::new().bg(theme::SURFACE_ALT())),
+            );
+            self.input_area
+                .set_style(Style::new().fg(theme::TEXT()).bg(theme::SURFACE_ALT()));
+            self.input_area
+                .set_cursor_style(Style::new().add_modifier(ratatui::style::Modifier::REVERSED));
+            if input_area.width > 0 {
+                frame.render_widget(&self.input_area, input_area);
+            }
         } else {
-            let dir_panel = Paragraph::new(format!("  {} ", self.cur_dir.display()))
-                .style(Style::new().fg(theme::TEXT()))
-                .block(dir_block.title(" [Working Directory] "))
-                .wrap(Wrap { trim: true });
-            frame.render_widget(dir_panel, dir_area);
+            let bar = Rect {
+                x: dir_area.x + ui::GUTTER,
+                width: dir_area.width.saturating_sub(ui::GUTTER * 2),
+                height: 1,
+                ..dir_area
+            };
+            let path = self.cur_dir.display().to_string();
+            let available = bar.width as usize;
+            let line = Line::from(vec![
+                Span::styled(
+                    format!("{}  ", icons::FOLDER),
+                    Style::new().fg(theme::ACCENT()),
+                ),
+                Span::styled(
+                    ui::fit_path(&path, available.saturating_sub(3)),
+                    Style::new().fg(theme::MUTED()),
+                ),
+            ]);
+            frame.render_widget(
+                Paragraph::new(line).style(Style::new().bg(theme::BG())),
+                bar,
+            );
         }
     }
 
     pub fn draw_console(&self, frame: &mut Frame, area: Rect) {
-        if area.height < 2 || self.lanes.is_empty() {
+        if area.height == 0 || self.lanes.is_empty() {
             return;
         }
 
         let Some(message) = self.lanes.active() else {
             return;
         };
-        let msg_panel = Paragraph::new(Line::from(Span::styled(
-            message.text.lines().collect::<Vec<_>>().join(" "),
-            Style::new().fg(message.color),
-        )))
-        .block(
-            block(Some(" [Console] "))
-                .border_style(theme::PURPLE())
-                .title_alignment(Right),
-        )
-        .wrap(Wrap { trim: false });
-        frame.render_widget(msg_panel, area);
+        let row = Rect {
+            x: area.x + ui::GUTTER,
+            width: area.width.saturating_sub(ui::GUTTER * 2),
+            height: 1,
+            ..area
+        };
+        let text = message.text.lines().collect::<Vec<_>>().join(" ");
+        let (glyph, rest) = match take_status_glyph(&text) {
+            Some((glyph, rest)) => (glyph, rest),
+            None => (status_glyph(message.color), text.as_str()),
+        };
+        let width = row.width.saturating_sub(2) as usize;
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(format!("{glyph} "), Style::new().fg(message.color).bold()),
+                Span::styled(ui::truncate(rest, width), Style::new().fg(message.color)),
+            ]))
+            .style(Style::new().bg(theme::BG())),
+            row,
+        );
     }
 
     pub fn handle_event(&mut self, key: KeyEvent) -> bool {
@@ -284,7 +382,9 @@ impl DirTerminal {
                     self.clear_error();
                 }
                 Ok(_) => self.set_message(theme::RED(), format!("cd: not a directory: {target}")),
-                Err(_) => self.set_message(theme::RED(), format!("cd: no such directory: {target}")),
+                Err(_) => {
+                    self.set_message(theme::RED(), format!("cd: no such directory: {target}"))
+                }
             }
         } else if cmd == "ls" {
             match fs::read_dir(&self.cur_dir) {
@@ -523,7 +623,7 @@ mod tests {
             .unwrap();
         let buffer = terminal.backend().buffer();
         let row = |y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>();
-        assert!(row(1).contains("running case 2/3"));
+        assert!(row(0).contains("running case 2/3"));
 
         dir.set_result(theme::GREEN(), "2/3 passed");
         terminal
@@ -531,8 +631,39 @@ mod tests {
             .unwrap();
         let buffer = terminal.backend().buffer();
         let row = |y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>();
-        assert!(row(1).contains("2/3 passed"));
-        assert!(!row(1).contains("running case 2/3"));
+        assert!(row(0).contains("2/3 passed"));
+        assert!(!row(0).contains("running case 2/3"));
+    }
+
+    #[test]
+    fn console_does_not_stack_glyphs_on_verdict_messages() {
+        let mut dir = DirTerminal::new(PathBuf::from("/tmp"));
+        dir.set_live(theme::CYAN(), "plain status");
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 3)).unwrap();
+        terminal
+            .draw(|frame| dir.draw_console(frame, Rect::new(0, 0, 40, 3)))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = |y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+        assert_eq!(
+            row(0).trim(),
+            "● plain status",
+            "a plain message still gets a status glyph"
+        );
+
+        dir.set_result(theme::GREEN(), "✔ ALL 2/2 PASSED");
+        dir.clear_live();
+        terminal
+            .draw(|frame| dir.draw_console(frame, Rect::new(0, 0, 40, 3)))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = |y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+        assert_eq!(
+            row(0).trim(),
+            "✔ ALL 2/2 PASSED",
+            "the verdict's own glyph is not duplicated"
+        );
     }
 
     #[test]
@@ -541,16 +672,16 @@ mod tests {
         assert_eq!(dir.console_height(120), 0, "empty consoles take no space");
 
         dir.set_result(theme::TEXT(), "short");
-        assert_eq!(dir.console_height(120), 3);
-        assert_eq!(dir.console_height(10), 3);
+        assert_eq!(dir.console_height(120), 1);
+        assert_eq!(dir.console_height(10), 1);
 
         dir.set_result(theme::TEXT(), "long ".repeat(500));
         assert_eq!(
             dir.console_height(120),
-            3,
+            1,
             "wrapping must not resize the layout"
         );
-        assert_eq!(dir.console_height(10), 3);
+        assert_eq!(dir.console_height(10), 1);
     }
 
     #[test]
