@@ -92,17 +92,10 @@ pub fn row_buf(buf: &mut Buffer, area: Rect, left: Line<'static>, right: Line<'s
     }
 }
 
-/// A keycap. Square brackets are legible in every font and keep the footer
-/// compact without relying on colour alone.
+/// A keycap. Square brackets are legible in every font and keep the console
+/// bar compact without relying on colour alone.
 pub fn key(key: &str) -> Span<'static> {
     Span::styled(format!("[{key}]"), Style::new().fg(theme::ACCENT()).bold())
-}
-
-pub fn key_muted(key: &str) -> Span<'static> {
-    Span::styled(
-        format!("[{key}]"),
-        Style::new().fg(theme::MUTED()).add_modifier(Modifier::BOLD),
-    )
 }
 
 pub fn badge(text: &str, color: Color) -> Span<'static> {
@@ -173,13 +166,13 @@ pub fn fit_path(text: &str, max: usize) -> String {
 }
 
 pub struct Sheet {
-    pub inner: Rect,
-    /// Content region below the title rule, above the footer hint row.
+    /// Content region below the title rule.
     pub body: Rect,
 }
 
 /// A centered sheet used by every modal: dimmed backdrop, raised surface,
-/// a compact title row and one footer row reserved for key hints.
+/// a compact title row and content below it. Key hints live in the console
+/// bar, so sheets do not reserve a footer row.
 pub fn sheet(
     frame: &mut Frame,
     area: Rect,
@@ -229,27 +222,13 @@ pub fn sheet(
         );
     }
 
-    let footer_height = u16::from(inner.height >= 4);
     let body = Rect {
         x: inner.x,
         y: inner.y.saturating_add(2).min(inner.bottom()),
         width: inner.width,
-        height: inner.height.saturating_sub(2 + footer_height),
+        height: inner.height.saturating_sub(2),
     };
-    Sheet { inner, body }
-}
-
-pub fn sheet_footer(frame: &mut Frame, sheet: &Sheet, hints: Line<'static>) {
-    if sheet.inner.height < 4 {
-        return;
-    }
-    let row = Rect {
-        x: sheet.inner.x,
-        y: sheet.inner.y + sheet.inner.height - 1,
-        width: sheet.inner.width,
-        height: 1,
-    };
-    frame.render_widget(Paragraph::new(hints), row);
+    Sheet { body }
 }
 
 pub fn dim(frame: &mut Frame, area: Rect) {

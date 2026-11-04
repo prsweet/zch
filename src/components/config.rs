@@ -12,11 +12,13 @@ use ratatui_textarea::TextArea;
 
 use crate::{
     components::{ScrollbarDrag, scroll_to_show, scrollbar, step_wrapped, theme, ui},
-    core::{AppTheme, Language, UserConfig, std_from_flag},
+    core::{Language, UserConfig, std_from_flag},
 };
 
-const MIN_VISIBLE_FLAGS: usize = 3;
-const MAX_VISIBLE_FLAGS: usize = 8;
+/// The flags list is a normal fixed-height list box: adding tags never
+/// resizes the sheet, and the wheel scrolls the viewport instead of walking
+/// the selection.
+const FLAG_ROWS: usize = 6;
 
 /// Where the flag list is in the `x`-deletion flow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +30,6 @@ enum DeleteStage {
 
 pub struct ConfigMenu {
     pub language: Language,
-    pub theme: AppTheme,
     pub flags: Vec<String>,
     pub flags_by_language: HashMap<Language, Vec<String>>,
     pub draft: TextArea<'static>,
@@ -36,6 +37,7 @@ pub struct ConfigMenu {
     pub error: Option<String>,
     pub flag_cursor: usize,
     flag_scroll: usize,
+    manual_scroll: bool,
     flags_area: ratatui::layout::Rect,
     flags_scrollbar_area: ratatui::layout::Rect,
     flags_scroll_drag: Option<ScrollbarDrag>,
@@ -51,7 +53,6 @@ impl ConfigMenu {
             .clone();
         Self {
             language: config.language,
-            theme: config.theme,
             flag_cursor: flags.len().saturating_sub(1),
             flags,
             flags_by_language,
@@ -59,6 +60,7 @@ impl ConfigMenu {
             active_field: 0,
             error: None,
             flag_scroll: 0,
+            manual_scroll: false,
             flags_area: ratatui::layout::Rect::default(),
             flags_scrollbar_area: ratatui::layout::Rect::default(),
             flags_scroll_drag: None,
@@ -73,7 +75,6 @@ impl ConfigMenu {
             language: self.language,
             extra_flags: self.flags.clone(),
             flags_by_language,
-            theme: self.theme,
         }
     }
 
@@ -94,15 +95,20 @@ impl ConfigMenu {
             .unwrap_or_default();
         self.flag_cursor = self.flags.len().saturating_sub(1);
         self.flag_scroll = 0;
+        self.manual_scroll = false;
         self.draft = TextArea::default();
         self.error = None;
         self.delete_stage = DeleteStage::Off;
     }
 
-    /// The flags panel grows with the list (up to `MAX_VISIBLE_FLAGS`) so
-    /// there is always room to show several tags; beyond that it scrolls.
-    fn visible_flag_rows(&self) -> usize {
-        self.flags.len().clamp(MIN_VISIBLE_FLAGS, MAX_VISIBLE_FLAGS)
+    /// The visible rows of the flags list. Falls back to the designed height
+    /// before the first draw.
+    fn flag_viewport(&self) -> usize {
+        if self.flags_area.height > 0 {
+            self.flags_area.height as usize
+        } else {
+            FLAG_ROWS
+        }
     }
 
     fn ensure_flag_visible_with(&mut self, visible: usize) {
@@ -124,8 +130,14 @@ impl ConfigMenu {
         if self.flags.is_empty() {
             return;
         }
-        self.flag_cursor = step_wrapped(self.flag_cursor, self.flags.len(), backwards);
-        self.ensure_flag_visible_with(self.visible_flag_rows());
+        // A normal list stops at the ends instead of wrapping.
+        self.flag_cursor = if backwards {
+            self.flag_cursor.saturating_sub(1)
+        } else {
+            (self.flag_cursor + 1).min(self.flags.len() - 1)
+        };
+        self.manual_scroll = false;
+        self.ensure_flag_visible_with(self.flag_viewport());
     }
 
     /// A flag that takes a value owns the bare tag right after it; deleting
@@ -157,12 +169,29 @@ impl ConfigMenu {
         self.flag_cursor = start.min(self.flags.len().saturating_sub(1));
         self.delete_stage = DeleteStage::Off;
         self.error = None;
-        self.ensure_flag_visible_with(self.visible_flag_rows());
+        self.manual_scroll = false;
+        self.ensure_flag_visible_with(self.flag_viewport());
+    }
+
+    /// The keys the console bar shows while the config menu owns the input.
+    pub fn key_hints(&self) -> &'static [(&'static str, &'static str)] {
+        match self.delete_stage {
+            DeleteStage::Select => &[("Tab", "select"), ("Enter", "confirm"), ("Esc", "cancel")],
+            DeleteStage::Confirm => &[("Enter", "delete"), ("Backspace", "back")],
+            DeleteStage::Off if self.active_field == 0 => {
+                &[("Tab", "field"), ("←/→", "language"), ("Esc", "close")]
+            }
+            DeleteStage::Off => &[
+                ("Tab", "field"),
+                ("Enter", "add"),
+                ("x", "delete"),
+                ("Esc", "close"),
+            ],
+        }
     }
 
     pub fn draw(&mut self, frame: &mut Frame, area: Rect) {
-        let desired_flags = self.visible_flag_rows() as u16;
-        let height = (14 + desired_flags)
+        let height = (13 + FLAG_ROWS as u16)
             .min(area.height.saturating_sub(2))
             .max(8);
         let width = (area.width * 68 / 100).clamp(54, 76);
@@ -173,7 +202,14 @@ impl ConfigMenu {
         }
 
         let list_height = body.height.saturating_sub(9) as usize;
-        self.ensure_flag_visible_with(list_height.max(1));
+        if list_height > 0 {
+            self.flag_scroll = self
+                .flag_scroll
+                .min(self.flags.len().saturating_sub(list_height));
+            if !self.manual_scroll {
+                self.ensure_flag_visible_with(list_height);
+            }
+        }
 
         let mut y = body.y;
         let lang_active = self.active_field == 0;
@@ -448,53 +484,6 @@ impl ConfigMenu {
         }
         y += 2;
 
-        let theme_active = self.active_field == 2;
-        if y < body.bottom() {
-            if theme_active {
-                ui::fill(
-                    frame,
-                    Rect {
-                        x: body.x,
-                        y,
-                        width: 1,
-                        height: 1,
-                    },
-                    theme::ACCENT(),
-                );
-            }
-            let value = if theme_active {
-                Line::from(vec![
-                    Span::styled("‹  ", Style::new().fg(theme::FAINT())),
-                    Span::styled(self.theme.label(), Style::new().fg(theme::ACCENT()).bold()),
-                    Span::styled("  ›", Style::new().fg(theme::FAINT())),
-                ])
-            } else {
-                Line::from(Span::styled(
-                    self.theme.label(),
-                    Style::new().fg(theme::TEXT()),
-                ))
-            };
-            ui::row(
-                frame,
-                Rect {
-                    x: body.x + 2,
-                    y,
-                    width: body.width.saturating_sub(4),
-                    height: 1,
-                },
-                Line::from(Span::styled(
-                    "Theme",
-                    Style::new().fg(if theme_active {
-                        theme::TEXT()
-                    } else {
-                        theme::MUTED()
-                    }),
-                )),
-                value,
-            );
-        }
-        y += 2;
-
         if y < body.bottom() {
             let hint = match &self.error {
                 Some(error) => Line::from(vec![
@@ -504,33 +493,13 @@ impl ConfigMenu {
                         Style::new().fg(theme::RED()),
                     ),
                 ]),
-                None => match self.delete_stage {
-                    DeleteStage::Select => Line::from(Span::styled(
-                        "Tab selects · Enter confirms · Esc cancels",
-                        Style::new().fg(theme::RED()),
-                    )),
-                    DeleteStage::Confirm => {
-                        let flag = self
-                            .flags
-                            .get(self.flag_cursor)
-                            .map(String::as_str)
-                            .unwrap_or("");
-                        Line::from(Span::styled(
-                            ui::truncate(
-                                &format!("Enter deletes {flag} · Backspace backs out"),
-                                body.width.saturating_sub(1) as usize,
-                            ),
-                            Style::new().fg(theme::RED()).bold(),
-                        ))
-                    }
-                    DeleteStage::Off => Line::from(vec![
-                        Span::styled("CF language id ", Style::new().fg(theme::FAINT())),
-                        Span::styled(
-                            self.language.cf_id(&self.flags),
-                            Style::new().fg(theme::MUTED()),
-                        ),
-                    ]),
-                },
+                None => Line::from(vec![
+                    Span::styled("CF language id ", Style::new().fg(theme::FAINT())),
+                    Span::styled(
+                        self.language.cf_id(&self.flags),
+                        Style::new().fg(theme::MUTED()),
+                    ),
+                ]),
             };
             frame.render_widget(
                 Paragraph::new(hint),
@@ -542,23 +511,6 @@ impl ConfigMenu {
                 },
             );
         }
-
-        ui::sheet_footer(
-            frame,
-            &sheet,
-            Line::from(vec![
-                ui::key("Tab"),
-                Span::styled(" field  ", Style::new().fg(theme::MUTED())),
-                ui::key("←/→"),
-                Span::styled(" change  ", Style::new().fg(theme::MUTED())),
-                ui::key("Enter"),
-                Span::styled(" add  ", Style::new().fg(theme::MUTED())),
-                ui::key("x"),
-                Span::styled(" delete  ", Style::new().fg(theme::MUTED())),
-                ui::key("Esc"),
-                Span::styled(" close", Style::new().fg(theme::MUTED())),
-            ]),
-        );
     }
 
     /// Mouse wheel and scrollbar dragging. Returns true when the event was
@@ -588,18 +540,26 @@ impl ConfigMenu {
                         position,
                     ) {
                         self.flags_scroll_drag = Some(drag);
+                        self.manual_scroll = true;
                         self.set_flag_scroll(scroll);
                     }
                 }
                 MouseEventKind::Drag(MouseButton::Left) => {
                     if let Some(drag) = self.flags_scroll_drag {
                         let scroll = drag.scroll_at(position);
+                        self.manual_scroll = true;
                         self.set_flag_scroll(scroll);
                     }
                 }
                 MouseEventKind::Up(MouseButton::Left) => self.flags_scroll_drag = None,
-                MouseEventKind::ScrollDown => self.move_flag_cursor(false),
-                MouseEventKind::ScrollUp => self.move_flag_cursor(true),
+                MouseEventKind::ScrollDown => {
+                    self.manual_scroll = true;
+                    self.set_flag_scroll(self.flag_scroll.saturating_add(1));
+                }
+                MouseEventKind::ScrollUp => {
+                    self.manual_scroll = true;
+                    self.set_flag_scroll(self.flag_scroll.saturating_sub(1));
+                }
                 _ => {}
             }
             return true;
@@ -607,8 +567,14 @@ impl ConfigMenu {
 
         if self.flags_area.contains(position) {
             match mouse.kind {
-                MouseEventKind::ScrollDown => self.move_flag_cursor(false),
-                MouseEventKind::ScrollUp => self.move_flag_cursor(true),
+                MouseEventKind::ScrollDown => {
+                    self.manual_scroll = true;
+                    self.set_flag_scroll(self.flag_scroll.saturating_add(1));
+                }
+                MouseEventKind::ScrollUp => {
+                    self.manual_scroll = true;
+                    self.set_flag_scroll(self.flag_scroll.saturating_sub(1));
+                }
                 _ => {}
             }
             return true;
@@ -618,11 +584,8 @@ impl ConfigMenu {
 
     fn set_flag_scroll(&mut self, scroll: usize) {
         let visible = self.flags_area.height as usize;
-        let max_scroll = self.flags.len().saturating_sub(visible);
+        let max_scroll = self.flags.len().saturating_sub(visible.max(1));
         self.flag_scroll = scroll.min(max_scroll);
-        if !self.flags.is_empty() {
-            self.flag_cursor = self.flag_scroll.min(self.flags.len() - 1);
-        }
     }
 
     pub fn handle_key(&mut self, event: Event) -> bool {
@@ -662,7 +625,7 @@ impl ConfigMenu {
             KeyCode::Tab | KeyCode::BackTab => {
                 let backwards =
                     key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT);
-                self.active_field = step_wrapped(self.active_field, 3, backwards);
+                self.active_field = step_wrapped(self.active_field, 2, backwards);
                 self.error = None;
             }
             KeyCode::Left if self.active_field == 0 => {
@@ -671,17 +634,10 @@ impl ConfigMenu {
             KeyCode::Right if self.active_field == 0 => {
                 self.switch_language(self.language.next());
             }
-            KeyCode::Left if self.active_field == 2 => {
-                self.theme = self.theme.prev();
-                theme::apply(self.theme);
-            }
-            KeyCode::Right if self.active_field == 2 => {
-                self.theme = self.theme.next();
-                theme::apply(self.theme);
-            }
             KeyCode::Char('x') if self.draft.is_empty() && !self.flags.is_empty() => {
                 self.flag_cursor = self.flag_cursor.min(self.flags.len() - 1);
-                self.ensure_flag_visible_with(self.visible_flag_rows());
+                self.manual_scroll = false;
+                self.ensure_flag_visible_with(self.flag_viewport());
                 self.delete_stage = DeleteStage::Select;
                 self.error = None;
             }
@@ -748,7 +704,8 @@ impl ConfigMenu {
         if !pending.is_empty() {
             self.flags.extend(pending);
             self.flag_cursor = self.flags.len() - 1;
-            self.ensure_flag_visible_with(self.visible_flag_rows());
+            self.manual_scroll = false;
+            self.ensure_flag_visible_with(self.flag_viewport());
             self.draft = TextArea::default();
             self.error = None;
         }
@@ -823,27 +780,20 @@ mod tests {
         assert_eq!(menu.active_field, 0);
         menu.handle_key(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
         assert_eq!(
-            menu.active_field, 2,
+            menu.active_field, 1,
             "a terminal that reports Shift+Tab as Tab must still go back"
         );
     }
 
     #[test]
-    fn theme_section_sits_under_the_flag_draft() {
+    fn config_has_no_theme_picker() {
         let mut menu = menu_with(&[]);
         let opened = screen(&mut menu, 80, 28);
-        assert!(opened.contains("Theme"), "{opened}");
-        assert!(opened.contains("Mocha"), "{opened}");
+        assert!(!opened.contains("Theme"), "{opened}");
+        assert!(!opened.contains("Mocha"), "{opened}");
         menu.handle_key(key(KeyCode::Tab));
         menu.handle_key(key(KeyCode::Tab));
-        assert_eq!(menu.active_field, 2);
-        menu.handle_key(key(KeyCode::Right));
-        assert_eq!(menu.theme, AppTheme::Prsweet);
-        assert_eq!(menu.to_config().theme, AppTheme::Prsweet);
-        let chosen = screen(&mut menu, 80, 28);
-        assert!(chosen.contains("prsweet's favourite"), "{chosen}");
-        menu.handle_key(key(KeyCode::Left));
-        assert_eq!(menu.theme, AppTheme::Mocha);
+        assert_eq!(menu.active_field, 0, "only language and flags remain");
     }
 
     #[test]
@@ -875,7 +825,6 @@ mod tests {
         type_text(&mut menu, "-u");
         menu.handle_key(key(KeyCode::Enter));
         menu.handle_key(key(KeyCode::Tab));
-        menu.handle_key(key(KeyCode::Tab));
 
         menu.handle_key(key(KeyCode::Left));
         assert_eq!(menu.language, Language::Cpp);
@@ -896,7 +845,6 @@ mod tests {
         let mut menu = menu_with(&[]);
         menu.handle_key(key(KeyCode::Tab));
         type_text(&mut menu, "-O2");
-        menu.handle_key(key(KeyCode::Tab));
         menu.handle_key(key(KeyCode::Tab));
 
         menu.handle_key(key(KeyCode::Right));
@@ -1059,11 +1007,12 @@ mod tests {
             ..Default::default()
         });
 
-        // The list auto-scrolls to the selected (newest) flag: eight rows are
+        // The list auto-scrolls to the selected (newest) flag: six rows are
         // visible at once, the rest stay reachable with the scrollbar.
         let initial = screen(&mut menu, 100, 30);
         assert!(initial.contains("-DOPT9"));
         assert!(!initial.contains("-DOPT0"));
+        assert_eq!(menu.flags_area.height as usize, FLAG_ROWS);
 
         menu.handle_key(key(KeyCode::Char('x')));
         let deleting = screen(&mut menu, 100, 30);
@@ -1138,7 +1087,41 @@ mod tests {
             menu.flags_area.x + 1,
             row,
         ));
-        assert_eq!(menu.flag_cursor, 1, "the wheel moves the selected flag");
+        assert_eq!(menu.flag_scroll, 1, "the wheel scrolls the list");
+        assert_eq!(menu.flag_cursor, 0, "the wheel keeps the selection put");
+        menu.handle_mouse(&mouse(MouseEventKind::ScrollUp, menu.flags_area.x + 1, row));
+        assert_eq!(menu.flag_scroll, 0);
+    }
+
+    #[test]
+    fn flags_panel_keeps_one_fixed_height() {
+        let mut few = menu_with(&["-O2"]);
+        let _ = screen(&mut few, 100, 30);
+        let flags: Vec<String> = (0..12).map(|i| format!("-DOPT{i}")).collect();
+        let mut many = ConfigMenu::new(&UserConfig {
+            language: Language::Cpp,
+            extra_flags: flags,
+            ..Default::default()
+        });
+        let _ = screen(&mut many, 100, 30);
+
+        assert_eq!(few.flags_area.height as usize, FLAG_ROWS);
+        assert_eq!(many.flags_area.height as usize, FLAG_ROWS);
+        assert_eq!(
+            few.flags_area.y, many.flags_area.y,
+            "adding flags must not resize or move the sheet"
+        );
+
+        // Selection stops at the last tag instead of wrapping to the top.
+        many.handle_key(key(KeyCode::Char('x')));
+        for _ in 0..20 {
+            many.handle_key(key(KeyCode::Tab));
+        }
+        assert_eq!(many.flag_cursor, many.flags.len() - 1);
+        for _ in 0..20 {
+            many.handle_key(key(KeyCode::BackTab));
+        }
+        assert_eq!(many.flag_cursor, 0);
     }
 
     #[test]

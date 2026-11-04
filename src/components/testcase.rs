@@ -619,7 +619,7 @@ impl TestCase {
             ),
             Span::styled(
                 format!(
-                    "   {}",
+                    " {}",
                     if self.collapsed {
                         icons::CHEVRON_RIGHT
                     } else {
@@ -865,12 +865,12 @@ impl TestCase {
             buf,
             title_area,
             Line::from(Span::styled(
-                title.to_uppercase(),
-                Style::new().fg(title_color).bold(),
-            )),
-            Line::from(Span::styled(
                 meta.to_string(),
                 Style::new().fg(theme::FAINT()),
+            )),
+            Line::from(Span::styled(
+                title.to_uppercase(),
+                Style::new().fg(title_color).bold(),
             )),
         );
         Rect {
@@ -1393,7 +1393,10 @@ mod tests {
         let title: String = (0..area.width).map(|x| buffer[(x, 0)].symbol()).collect();
         let delete_x = title.find("DELETE").expect("delete label") as u16;
         assert_eq!(buffer[(delete_x, 0)].fg, theme::RED());
-        assert!(title.contains("01") && title.contains('▾'), "{title}");
+        assert!(
+            title.contains("01") && title.contains(icons::CHEVRON_DOWN),
+            "{title}"
+        );
         assert_eq!(
             buffer[(area.x, area.y)].bg,
             theme::RED(),

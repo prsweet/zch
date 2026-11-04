@@ -45,7 +45,6 @@ fn status_glyph(color: Color) -> char {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MessageLane {
-    Hint,
     Live,
     Result,
     Error,
@@ -53,7 +52,6 @@ enum MessageLane {
 
 #[derive(Default)]
 struct MessageLanes {
-    hint: Option<Message>,
     live: Option<Message>,
     result: Option<Message>,
     error: Option<Message>,
@@ -62,7 +60,6 @@ struct MessageLanes {
 impl MessageLanes {
     fn set(&mut self, lane: MessageLane, message: Message) -> bool {
         let slot = match lane {
-            MessageLane::Hint => &mut self.hint,
             MessageLane::Live => &mut self.live,
             MessageLane::Result => &mut self.result,
             MessageLane::Error => &mut self.error,
@@ -75,21 +72,14 @@ impl MessageLanes {
         }
         *slot = Some(message);
 
-        match lane {
-            MessageLane::Result => {
-                self.hint = None;
-                self.error = None;
-            }
-            MessageLane::Error => self.hint = None,
-            MessageLane::Live => self.hint = None,
-            MessageLane::Hint => {}
+        if lane == MessageLane::Result {
+            self.error = None;
         }
         true
     }
 
     fn clear(&mut self, lane: MessageLane) -> bool {
         let slot = match lane {
-            MessageLane::Hint => &mut self.hint,
             MessageLane::Live => &mut self.live,
             MessageLane::Result => &mut self.result,
             MessageLane::Error => &mut self.error,
@@ -97,16 +87,11 @@ impl MessageLanes {
         slot.take().is_some()
     }
 
-    fn is_empty(&self) -> bool {
-        self.hint.is_none() && self.live.is_none() && self.result.is_none() && self.error.is_none()
-    }
-
     fn active(&self) -> Option<&Message> {
         self.error
             .as_ref()
             .or(self.result.as_ref())
             .or(self.live.as_ref())
-            .or(self.hint.as_ref())
     }
 }
 
@@ -119,7 +104,11 @@ struct Completion {
 pub struct DirTerminal {
     pub cur_dir: PathBuf,
     pub input_area: TextArea<'static>,
+    /// Compatibility snapshot: the active console message, or the directory
+    /// output when the console is quiet.
     pub output: Option<Message>,
+    /// Directory command output lives in the path bar, not the console.
+    dir_output: Option<Message>,
     lanes: MessageLanes,
     history: Vec<String>,
     history_cursor: Option<usize>,
@@ -132,6 +121,7 @@ impl DirTerminal {
             cur_dir: initial_dir,
             input_area: TextArea::default(),
             output: None,
+            dir_output: None,
             lanes: MessageLanes::default(),
             history: Vec::new(),
             history_cursor: None,
@@ -139,15 +129,24 @@ impl DirTerminal {
         }
     }
 
+    /// Directory command output (`ls`, `pwd`, `cd` errors) belongs to the path
+    /// bar, not the run-result console.
     pub fn set_message(&mut self, color: Color, text: impl Into<String>) {
-        let lane = if color == theme::MUTED() {
-            MessageLane::Hint
-        } else if color == theme::RED() {
-            MessageLane::Error
-        } else {
-            MessageLane::Result
-        };
-        self.set_lane(lane, color, text);
+        self.dir_output = Some(Message::new(color, text));
+        self.sync_output();
+    }
+
+    pub fn clear_dir_output(&mut self) {
+        self.dir_output = None;
+        self.sync_output();
+    }
+
+    fn sync_output(&mut self) {
+        self.output = self
+            .lanes
+            .active()
+            .cloned()
+            .or_else(|| self.dir_output.clone());
     }
 
     pub fn set_live(&mut self, color: Color, text: impl Into<String>) {
@@ -158,54 +157,43 @@ impl DirTerminal {
         self.set_lane(MessageLane::Result, color, text);
     }
 
-    pub fn set_hint(&mut self, color: Color, text: impl Into<String>) {
-        self.set_lane(MessageLane::Hint, color, text);
-    }
-
     pub fn set_error(&mut self, color: Color, text: impl Into<String>) {
         self.set_lane(MessageLane::Error, color, text);
     }
 
-    pub fn clear_hint(&mut self) {
-        if self.lanes.clear(MessageLane::Hint) {
-            self.output = self.lanes.active().cloned();
-        }
+    /// Errors stay visible in modes that otherwise show their key hints.
+    pub fn has_error(&self) -> bool {
+        self.lanes.error.is_some()
     }
 
     pub fn clear_live(&mut self) {
         if self.lanes.clear(MessageLane::Live) {
-            self.output = self.lanes.active().cloned();
+            self.sync_output();
         }
     }
 
     pub fn clear_result(&mut self) {
         if self.lanes.clear(MessageLane::Result) {
-            self.output = self.lanes.active().cloned();
+            self.sync_output();
         }
     }
 
     pub fn clear_error(&mut self) {
         if self.lanes.clear(MessageLane::Error) {
-            self.output = self.lanes.active().cloned();
+            self.sync_output();
         }
     }
 
     fn set_lane(&mut self, lane: MessageLane, color: Color, text: impl Into<String>) {
         if self.lanes.set(lane, Message::new(color, text)) {
-            self.output = self.lanes.active().cloned();
+            self.sync_output();
         }
     }
 
-    /// Height of the working-directory / command bar. One compact row, so the
-    /// code and test output keep the vertical space.
+    /// Height of the working-directory / command bar. One compact row, plus one
+    /// row when a directory command has output to show.
     pub fn input_height(&self) -> u16 {
-        1
-    }
-
-    /// The console is a single fixed status line, so incoming messages never
-    /// resize the rest of the layout.
-    pub fn console_height(&self, _width: u16) -> u16 {
-        if self.lanes.is_empty() { 0 } else { 1 }
+        1 + u16::from(self.dir_output.is_some())
     }
 
     pub fn draw_input(&mut self, frame: &mut Frame, area: Rect, is_active: bool) {
@@ -297,36 +285,65 @@ impl DirTerminal {
                 bar,
             );
         }
+
+        if dir_area.height > 1 {
+            let output_area = Rect {
+                x: dir_area.x + ui::GUTTER,
+                y: dir_area.y + 1,
+                width: dir_area.width.saturating_sub(ui::GUTTER * 2),
+                height: 1,
+            };
+            ui::fill(
+                frame,
+                Rect {
+                    y: output_area.y,
+                    height: 1,
+                    ..dir_area
+                },
+                theme::BG(),
+            );
+            if let Some(message) = &self.dir_output {
+                let text = message.text.lines().collect::<Vec<_>>().join(" ");
+                let glyph = if message.color == theme::RED() {
+                    "✘ "
+                } else if message.color == theme::YELLOW() {
+                    "! "
+                } else {
+                    ""
+                };
+                let width = (output_area.width as usize).saturating_sub(glyph.width());
+                let mut spans = Vec::new();
+                if !glyph.is_empty() {
+                    spans.push(Span::styled(glyph, Style::new().fg(message.color).bold()));
+                }
+                spans.push(Span::styled(
+                    ui::truncate(&text, width),
+                    Style::new().fg(message.color),
+                ));
+                frame.render_widget(
+                    Paragraph::new(Line::from(spans)).style(Style::new().bg(theme::BG())),
+                    output_area,
+                );
+            }
+        }
     }
 
-    pub fn draw_console(&self, frame: &mut Frame, area: Rect) {
-        if area.height == 0 || self.lanes.is_empty() {
-            return;
+    /// The single-line run-result console. `None` leaves the bar empty.
+    pub fn console_line(&self, max_width: usize) -> Option<Line<'static>> {
+        let message = self.lanes.active()?;
+        if max_width == 0 {
+            return None;
         }
-
-        let Some(message) = self.lanes.active() else {
-            return;
-        };
-        let row = Rect {
-            x: area.x + ui::GUTTER,
-            width: area.width.saturating_sub(ui::GUTTER * 2),
-            height: 1,
-            ..area
-        };
         let text = message.text.lines().collect::<Vec<_>>().join(" ");
         let (glyph, rest) = match take_status_glyph(&text) {
             Some((glyph, rest)) => (glyph, rest),
             None => (status_glyph(message.color), text.as_str()),
         };
-        let width = row.width.saturating_sub(2) as usize;
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(format!("{glyph} "), Style::new().fg(message.color).bold()),
-                Span::styled(ui::truncate(rest, width), Style::new().fg(message.color)),
-            ]))
-            .style(Style::new().bg(theme::BG())),
-            row,
-        );
+        let width = max_width.saturating_sub(2);
+        Some(Line::from(vec![
+            Span::styled(format!("{glyph} "), Style::new().fg(message.color).bold()),
+            Span::styled(ui::truncate(rest, width), Style::new().fg(message.color)),
+        ]))
     }
 
     pub fn handle_event(&mut self, key: KeyEvent) -> bool {
@@ -340,7 +357,7 @@ impl DirTerminal {
             KeyCode::Up => self.history_up(),
             KeyCode::Down => self.history_down(),
             KeyCode::Esc => {
-                self.clear_hint();
+                self.clear_dir_output();
                 return true;
             }
             _ => {
@@ -360,6 +377,8 @@ impl DirTerminal {
             return;
         }
 
+        self.clear_dir_output();
+
         if self.history.last() != Some(&cmd) {
             self.history.push(cmd.clone());
             if self.history.len() > HISTORY_LIMIT {
@@ -378,8 +397,6 @@ impl DirTerminal {
             match new_path.canonicalize() {
                 Ok(canonical) if canonical.is_dir() => {
                     self.cur_dir = canonical;
-                    self.clear_hint();
-                    self.clear_error();
                 }
                 Ok(_) => self.set_message(theme::RED(), format!("cd: not a directory: {target}")),
                 Err(_) => {
@@ -401,7 +418,12 @@ impl DirTerminal {
                         })
                         .collect();
                     names.sort();
-                    self.set_message(theme::CYAN(), names.join("   "));
+                    let listing = if names.is_empty() {
+                        "empty directory".to_string()
+                    } else {
+                        names.join("   ")
+                    };
+                    self.set_message(theme::CYAN(), listing);
                 }
                 Err(e) => self.set_message(theme::RED(), format!("ls: {e}")),
             }
@@ -479,7 +501,7 @@ impl DirTerminal {
 
         if matches.len() == 1 {
             self.input_area.insert_str("/");
-            self.clear_hint();
+            self.clear_dir_output();
         } else {
             self.show_matches(&matches, dir_part);
             self.completion = Some(Completion {
@@ -555,11 +577,7 @@ fn common_extension(matches: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::{
-        Terminal,
-        backend::TestBackend,
-        crossterm::event::{KeyEvent, KeyModifiers},
-    };
+    use ratatui::crossterm::event::{KeyEvent, KeyModifiers};
 
     fn tab() -> KeyEvent {
         KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)
@@ -612,76 +630,64 @@ mod tests {
         );
     }
 
+    fn console_text(dir: &DirTerminal, width: usize) -> String {
+        dir.console_line(width)
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .unwrap_or_default()
+    }
+
     #[test]
     fn console_renders_the_active_message_on_one_line() {
         let mut dir = DirTerminal::new(PathBuf::from("/tmp"));
         dir.set_live(theme::CYAN(), "running case 2/3");
-
-        let mut terminal = Terminal::new(TestBackend::new(40, 3)).unwrap();
-        terminal
-            .draw(|frame| dir.draw_console(frame, Rect::new(0, 0, 40, 3)))
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let row = |y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>();
-        assert!(row(0).contains("running case 2/3"));
+        assert!(console_text(&dir, 40).contains("running case 2/3"));
 
         dir.set_result(theme::GREEN(), "2/3 passed");
-        terminal
-            .draw(|frame| dir.draw_console(frame, Rect::new(0, 0, 40, 3)))
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let row = |y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>();
-        assert!(row(0).contains("2/3 passed"));
-        assert!(!row(0).contains("running case 2/3"));
+        let text = console_text(&dir, 40);
+        assert!(text.contains("2/3 passed"));
+        assert!(!text.contains("running case 2/3"));
     }
 
     #[test]
     fn console_does_not_stack_glyphs_on_verdict_messages() {
         let mut dir = DirTerminal::new(PathBuf::from("/tmp"));
         dir.set_live(theme::CYAN(), "plain status");
-
-        let mut terminal = Terminal::new(TestBackend::new(40, 3)).unwrap();
-        terminal
-            .draw(|frame| dir.draw_console(frame, Rect::new(0, 0, 40, 3)))
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let row = |y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>();
         assert_eq!(
-            row(0).trim(),
+            console_text(&dir, 40),
             "● plain status",
             "a plain message still gets a status glyph"
         );
 
         dir.set_result(theme::GREEN(), "✔ ALL 2/2 PASSED");
         dir.clear_live();
-        terminal
-            .draw(|frame| dir.draw_console(frame, Rect::new(0, 0, 40, 3)))
-            .unwrap();
-        let buffer = terminal.backend().buffer();
-        let row = |y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>();
         assert_eq!(
-            row(0).trim(),
+            console_text(&dir, 40),
             "✔ ALL 2/2 PASSED",
             "the verdict's own glyph is not duplicated"
         );
     }
 
     #[test]
-    fn console_height_is_one_line_and_stable_for_wrapped_messages() {
+    fn console_line_stays_on_one_line_at_every_width() {
         let mut dir = DirTerminal::new(PathBuf::from("/tmp"));
-        assert_eq!(dir.console_height(120), 0, "empty consoles take no space");
+        assert!(dir.console_line(120).is_none(), "empty consoles stay quiet");
 
         dir.set_result(theme::TEXT(), "short");
-        assert_eq!(dir.console_height(120), 1);
-        assert_eq!(dir.console_height(10), 1);
+        assert_eq!(console_text(&dir, 120), "· short");
+        assert!(console_text(&dir, 10).chars().count() <= 10);
 
         dir.set_result(theme::TEXT(), "long ".repeat(500));
         assert_eq!(
-            dir.console_height(120),
-            1,
-            "wrapping must not resize the layout"
+            console_text(&dir, 120).chars().count(),
+            120,
+            "long results truncate instead of resizing the layout"
         );
-        assert_eq!(dir.console_height(10), 1);
+        assert!(console_text(&dir, 10).chars().count() <= 10);
     }
 
     #[test]

@@ -191,14 +191,9 @@ fn thumb_geometry(track_len: usize, content_length: usize, position: usize) -> (
 }
 
 /// Active palette. Truecolor only, so the UI does not follow the terminal theme.
-/// `apply` selects Mocha or prsweet's favourite for this thread.
 #[allow(non_snake_case)]
 pub mod theme {
-    use std::cell::Cell;
-
     use ratatui::style::Color;
-
-    use crate::core::AppTheme;
 
     #[derive(Clone, Copy)]
     struct Palette {
@@ -220,7 +215,7 @@ pub mod theme {
     }
 
     /// Obsidian canvas, cool graphite surfaces and one clear periwinkle accent.
-    const MOCHA: Palette = Palette {
+    const PALETTE: Palette = Palette {
         bg: Color::Rgb(0x09, 0x0b, 0x0f),
         surface: Color::Rgb(0x10, 0x14, 0x1b),
         surface_alt: Color::Rgb(0x16, 0x1c, 0x26),
@@ -238,38 +233,8 @@ pub mod theme {
         cyan: Color::Rgb(0x7f, 0xe0, 0xcd),
     };
 
-    /// The editor-adjacent palette: brighter syntax hues on a deeper ground.
-    const PRSWEET: Palette = Palette {
-        bg: Color::Rgb(0x07, 0x09, 0x0d),
-        surface: Color::Rgb(0x0d, 0x11, 0x18),
-        surface_alt: Color::Rgb(0x13, 0x19, 0x23),
-        border: Color::Rgb(0x26, 0x30, 0x3e),
-        line_strong: Color::Rgb(0x3a, 0x47, 0x59),
-        faint: Color::Rgb(0x53, 0x60, 0x73),
-        muted: Color::Rgb(0x8c, 0x97, 0xa9),
-        text: Color::Rgb(0xf0, 0xf4, 0xfa),
-        accent: Color::Rgb(0x9c, 0xc4, 0xff),
-        green: Color::Rgb(0xa9, 0xd9, 0x7e),
-        red: Color::Rgb(0xff, 0x5c, 0x72),
-        yellow: Color::Rgb(0xe7, 0xbc, 0x74),
-        orange: Color::Rgb(0xff, 0x9e, 0x64),
-        purple: Color::Rgb(0xbb, 0xa0, 0xff),
-        cyan: Color::Rgb(0x63, 0xdf, 0xc7),
-    };
-
-    thread_local! {
-        static CURRENT: Cell<AppTheme> = const { Cell::new(AppTheme::Mocha) };
-    }
-
-    pub fn apply(theme: AppTheme) {
-        CURRENT.with(|current| current.set(theme));
-    }
-
     fn palette() -> Palette {
-        CURRENT.with(|current| match current.get() {
-            AppTheme::Mocha => MOCHA,
-            AppTheme::Prsweet => PRSWEET,
-        })
+        PALETTE
     }
 
     pub fn BORDER() -> Color {
@@ -327,8 +292,8 @@ pub mod theme {
 pub mod icons {
     pub const FOLDER: &str = "\u{f07b}";
     pub const FILE: &str = "\u{f15b}";
-    pub const CHEVRON_DOWN: &str = "▾";
-    pub const CHEVRON_RIGHT: &str = "▸";
+    pub const CHEVRON_DOWN: &str = "\u{25bc}";
+    pub const CHEVRON_RIGHT: &str = "\u{25b6}";
     pub const POINTER: &str = "❯";
 }
 

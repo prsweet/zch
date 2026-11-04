@@ -12,14 +12,14 @@ use ratatui::{
 
 use crate::components::{theme, ui};
 
-pub fn render(frame: &mut Frame, area: Rect, spinner: &str, tick: i64, port: u16) {
+pub fn render(frame: &mut Frame, area: Rect, tick: i64, port: u16) {
     // The mark breathes slowly (≈13s cycle at the 110ms tick).
     let phase = tick.rem_euclid(120) as f32 / 120.0;
 
     let mut lines: Vec<Line> = logo_lines(phase);
     lines.push(Line::default());
     lines.push(Line::styled(
-        ui::spaced("competitive programming, in flow"),
+        ui::spaced("competitive programming"),
         Style::new().fg(theme::MUTED()).bold(),
     ));
     lines.push(Line::default());
@@ -29,11 +29,9 @@ pub fn render(frame: &mut Frame, area: Rect, spinner: &str, tick: i64, port: u16
     ));
     lines.push(Line::default());
     lines.push(Line::from(vec![
-        Span::styled(format!("{spinner}  "), Style::new().fg(theme::ACCENT())),
         ui::dot(theme::GREEN()),
-        Span::styled(" LISTENING", Style::new().fg(theme::MUTED()).bold()),
         Span::styled(
-            format!("   127.0.0.1:{port}"),
+            format!(" listening on 127.0.0.1:{port}"),
             Style::new().fg(theme::FAINT()),
         ),
     ]));
@@ -44,11 +42,23 @@ pub fn render(frame: &mut Frame, area: Rect, spinner: &str, tick: i64, port: u16
     lines.push(Line::default());
     lines.push(Line::from(vec![
         ui::key("r"),
-        Span::styled(" run    ", Style::new().fg(theme::MUTED())),
+        Span::styled("un       ", Style::new().fg(theme::MUTED())),
         ui::key("s"),
-        Span::styled(" submit    ", Style::new().fg(theme::MUTED())),
+        Span::styled("ubmit    ", Style::new().fg(theme::MUTED())),
         ui::key("h"),
-        Span::styled(" keys", Style::new().fg(theme::MUTED())),
+        Span::styled("elp      ", Style::new().fg(theme::MUTED())),
+        ui::key("e"),
+        Span::styled("dit      ", Style::new().fg(theme::MUTED())),
+    ]));
+    lines.push(Line::from(vec![
+        ui::key("a"),
+        Span::styled("dd       ", Style::new().fg(theme::MUTED())),
+        ui::key("c"),
+        Span::styled("onfig    ", Style::new().fg(theme::MUTED())),
+        ui::key("d"),
+        Span::styled("irectory ", Style::new().fg(theme::MUTED())),
+        ui::key("q"),
+        Span::styled("uit      ", Style::new().fg(theme::MUTED())),
     ]));
 
     let height = lines.len() as u16;
@@ -137,7 +147,7 @@ mod tests {
             terminal
                 .draw(|frame| {
                     let area = frame.area();
-                    render(frame, area, "⠋", 0, 10043);
+                    render(frame, area, 0, 10043);
                 })
                 .unwrap();
             let buffer = terminal.backend().buffer();
@@ -152,7 +162,7 @@ mod tests {
                 println!("{width}x{height}\n{text}");
             }
             assert!(text.contains('█'), "logo missing at {width}x{height}");
-            assert!(text.contains("LISTENING"));
+            assert!(text.contains("listening on"));
             assert!(text.contains("127.0.0.1:10043"));
         }
     }
