@@ -21,7 +21,7 @@ use crate::{
         PassingCommand::{self, ToHelper, ToRunner, ToSubmitter},
         fs_ops::FsOps,
         receiver::spawn_server,
-        runner::spawn_runner,
+        runner::{kill_live_session, spawn_runner},
         submitter::spawn_submitter,
     },
     helper::Helper,
@@ -128,6 +128,7 @@ fn run_tui() -> color_eyre::Result<()> {
 
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        kill_live_session();
         let _ = execute!(stdout(), DisableMouseCapture);
         ratatui::restore();
         default_hook(info);
@@ -138,6 +139,10 @@ fn run_tui() -> color_eyre::Result<()> {
 
     let _ = execute!(stdout(), EnableMouseCapture);
     let result = run_app(&mut terminal, &mut helper);
+    // The runner thread cannot be joined here, but the process group can be
+    // killed synchronously so quitting never leaves an interactive child
+    // running in the background.
+    kill_live_session();
     let _ = execute!(stdout(), DisableMouseCapture);
 
     ratatui::restore();
@@ -201,6 +206,15 @@ fn run_app(terminal: &mut DefaultTerminal, helper: &mut Helper) -> color_eyre::R
                     HelperCommand::RunFinished { run_id, elapsed_ms } => {
                         helper.run_finished(run_id, elapsed_ms)
                     }
+                    HelperCommand::SessionChunk {
+                        session_id,
+                        stream,
+                        text,
+                    } => helper.session_chunk(session_id, stream, text),
+                    HelperCommand::SessionEnded {
+                        session_id,
+                        message,
+                    } => helper.session_ended(session_id, message),
                     HelperCommand::SubmitStatus { id, message } => {
                         helper.submit_status(id, message)
                     }
@@ -208,16 +222,18 @@ fn run_app(terminal: &mut DefaultTerminal, helper: &mut Helper) -> color_eyre::R
                         helper.submit_finished(id, result)
                     }
                     HelperCommand::Error(error) => helper.set_error(error),
+                    HelperCommand::ListenerDown(reason) => helper.listener_down(reason),
                     HelperCommand::Quit => return Ok(()),
                 },
             }
         }
 
-        if (helper.busy() || helper.tc_list.testcases.is_empty())
-            && last_tick.elapsed() >= Duration::from_millis(110)
+        // Redraw on a timer only while something on screen is moving.
+        let now = Instant::now();
+        if let Some(interval) = helper.frame_interval(now)
+            && now.saturating_duration_since(last_tick) >= interval
         {
-            helper.tick();
-            last_tick = Instant::now();
+            last_tick = now;
             dirty = true;
         }
 

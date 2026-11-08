@@ -1,15 +1,18 @@
 use ratatui::{
     crossterm::event::MouseEvent,
     layout::{Position, Rect},
-    style::Color,
+    style::Style,
     widgets::{Scrollbar, ScrollbarOrientation},
 };
 
 pub mod config;
 pub mod dir_terminal;
+pub mod motion;
 pub mod splash;
+pub mod status;
 pub mod tc_list;
 pub mod testcase;
+pub mod theme;
 pub mod ui;
 
 /// Move a cursor by one, wrapping at both ends.
@@ -67,15 +70,13 @@ impl ScrollbarDrag {
         position: usize,
         pointer: Position,
     ) -> Option<(Self, usize)> {
-        let area_len = if vertical { area.height } else { area.width } as usize;
-        let begin_len = 1.min(area_len);
-        let end_len = 1.min(area_len.saturating_sub(begin_len));
-        let track_len = area_len.saturating_sub(begin_len + end_len);
+        // `scrollbar()` draws no arrows, so the track is the whole area.
+        let track_len = if vertical { area.height } else { area.width } as usize;
         if content_length == 0 || track_len == 0 {
             return None;
         }
 
-        let origin = if vertical { area.y } else { area.x } + begin_len as u16;
+        let origin = if vertical { area.y } else { area.x };
         let pointer_index = if vertical { pointer.y } else { pointer.x };
         let index = pointer_index
             .saturating_sub(origin)
@@ -190,142 +191,42 @@ fn thumb_geometry(track_len: usize, content_length: usize, position: usize) -> (
     (thumb_start, thumb_len)
 }
 
-/// Active palette. Truecolor only, so the UI does not follow the terminal theme.
-#[allow(non_snake_case)]
-pub mod theme {
-    use ratatui::style::Color;
-
-    #[derive(Clone, Copy)]
-    struct Palette {
-        bg: Color,
-        surface: Color,
-        surface_alt: Color,
-        border: Color,
-        line_strong: Color,
-        faint: Color,
-        muted: Color,
-        text: Color,
-        accent: Color,
-        green: Color,
-        red: Color,
-        yellow: Color,
-        orange: Color,
-        purple: Color,
-        cyan: Color,
-    }
-
-    /// Obsidian canvas, cool graphite surfaces and one clear periwinkle accent.
-    const PALETTE: Palette = Palette {
-        bg: Color::Rgb(0x09, 0x0b, 0x0f),
-        surface: Color::Rgb(0x10, 0x14, 0x1b),
-        surface_alt: Color::Rgb(0x16, 0x1c, 0x26),
-        border: Color::Rgb(0x24, 0x2d, 0x3a),
-        line_strong: Color::Rgb(0x35, 0x42, 0x56),
-        faint: Color::Rgb(0x4a, 0x56, 0x68),
-        muted: Color::Rgb(0x7e, 0x8a, 0x9e),
-        text: Color::Rgb(0xe8, 0xee, 0xf7),
-        accent: Color::Rgb(0x8c, 0xb8, 0xff),
-        green: Color::Rgb(0x8f, 0xe3, 0xa2),
-        red: Color::Rgb(0xff, 0x7d, 0x92),
-        yellow: Color::Rgb(0xf0, 0xcf, 0x7a),
-        orange: Color::Rgb(0xff, 0xa6, 0x6f),
-        purple: Color::Rgb(0xc8, 0xa9, 0xff),
-        cyan: Color::Rgb(0x7f, 0xe0, 0xcd),
-    };
-
-    fn palette() -> Palette {
-        PALETTE
-    }
-
-    pub fn BORDER() -> Color {
-        palette().border
-    }
-    pub fn BG() -> Color {
-        palette().bg
-    }
-    pub fn SURFACE() -> Color {
-        palette().surface
-    }
-    pub fn SURFACE_ALT() -> Color {
-        palette().surface_alt
-    }
-    pub fn LINE() -> Color {
-        palette().border
-    }
-    pub fn LINE_STRONG() -> Color {
-        palette().line_strong
-    }
-    pub fn FAINT() -> Color {
-        palette().faint
-    }
-    pub fn MUTED() -> Color {
-        palette().muted
-    }
-    pub fn TEXT() -> Color {
-        palette().text
-    }
-    pub fn ACCENT() -> Color {
-        palette().accent
-    }
-    pub fn GREEN() -> Color {
-        palette().green
-    }
-    pub fn RED() -> Color {
-        palette().red
-    }
-    pub fn YELLOW() -> Color {
-        palette().yellow
-    }
-    pub fn ORANGE() -> Color {
-        palette().orange
-    }
-    pub fn PURPLE() -> Color {
-        palette().purple
-    }
-    pub fn CYAN() -> Color {
-        palette().cyan
-    }
-}
-
 /// Nerd Font glyphs — private-use codepoints, so every machine with a patched
-/// font shows the exact same icons (no OS-dependent emoji artwork).
+/// font shows the exact same icons (no OS-dependent emoji artwork). The
+/// arrows are narrow-class characters that render one cell wide everywhere.
 pub mod icons {
     pub const FOLDER: &str = "\u{f07b}";
+    pub const FOLDER_OPEN: &str = "\u{f07c}";
     pub const FILE: &str = "\u{f15b}";
-    pub const CHEVRON_DOWN: &str = "\u{25bc}";
-    pub const CHEVRON_RIGHT: &str = "\u{25b6}";
-    pub const POINTER: &str = "❯";
+    pub const CPP: &str = "\u{e61d}";
+    pub const PYTHON: &str = "\u{e606}";
+    pub const JAVA: &str = "\u{e256}";
+    pub const RUST: &str = "\u{e7a8}";
+    pub const JSON: &str = "\u{e60b}";
+    pub const TEXT: &str = "\u{f15c}";
+    /// Test data: `.in`, `.out`, `.ans`.
+    pub const DATA: &str = "\u{f0ce}";
+    pub const EXPANDED: &str = "▾";
+    pub const COLLAPSED: &str = "▸";
+    pub const PROMPT: &str = "❯";
+    /// The focus rail at the left edge of the selected case or pane.
+    pub const RAIL: &str = "▎";
 }
 
-/// A one-cell scrollbar: a quiet track and a solid half-block thumb.
+/// A one-cell scrollbar: no track, a thin thumb in the border colour —
+/// present when you look for it, invisible when you don't.
 pub fn scrollbar(orientation: ScrollbarOrientation) -> Scrollbar<'static> {
-    let (thumb, track) = if orientation.is_vertical() {
-        ("▐", "│")
+    let thumb = if orientation.is_vertical() {
+        "┃"
     } else {
-        ("━", "─")
+        "━"
     };
     Scrollbar::new(orientation)
         .thumb_symbol(thumb)
-        .track_symbol(Some(track))
+        .track_symbol(None)
         .begin_symbol(None)
         .end_symbol(None)
-        .style(theme::MUTED())
-        .track_style(theme::BORDER())
-}
-
-#[derive(Debug, Clone)]
-pub struct Message {
-    pub color: Color,
-    pub text: String,
-}
-
-impl Message {
-    pub fn new(color: Color, text: impl Into<String>) -> Self {
-        Self {
-            color,
-            text: text.into(),
-        }
-    }
+        .thumb_style(Style::new().fg(theme::border()))
 }
 
 pub struct VisualState {
@@ -358,8 +259,8 @@ mod tests {
         let area = Rect::new(0, 0, 1, 22);
         let content_length = 100;
         let position = 50;
-        let (thumb_start, thumb_len) = thumb_geometry(20, content_length, position);
-        let grab_y = 1 + thumb_start + thumb_len / 2;
+        let (thumb_start, thumb_len) = thumb_geometry(22, content_length, position);
+        let grab_y = thumb_start + thumb_len / 2;
         let (drag, scroll) = ScrollbarDrag::begin(
             area,
             true,
@@ -385,8 +286,8 @@ mod tests {
         let area = Rect::new(0, 0, 1, 22);
         let content_length = 19_980;
         let position = 10_000;
-        let (thumb_start, thumb_len) = thumb_geometry(20, content_length, position);
-        let grab_y = 1 + thumb_start + thumb_len / 2;
+        let (thumb_start, thumb_len) = thumb_geometry(22, content_length, position);
+        let grab_y = thumb_start + thumb_len / 2;
         let (drag, scroll) = ScrollbarDrag::begin(
             area,
             true,

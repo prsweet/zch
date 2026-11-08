@@ -57,16 +57,27 @@ pub enum Outcome {
 
 /// Judge verdict of the final `submitter::submit` string. Shared by the TUI
 /// submission bar and result classification.
+///
+/// Only a final `RESULT:` is a verdict. Failures mention pretests too
+/// ("Wrong answer on pretest 2"), so "pretest" alone means nothing; only
+/// "Pretests passed" is the partial (yellow) outcome.
 pub fn classify(result: &str) -> Outcome {
-    let lower = result.to_lowercase();
-    if lower.contains("pretest") {
+    if result.starts_with("REJECTED") {
+        return Outcome::Rejected;
+    }
+    let Some(verdict) = result.strip_prefix("RESULT:") else {
+        return Outcome::Failed;
+    };
+    let verdict = verdict.trim().to_lowercase();
+    if verdict.starts_with("pretests passed") {
         Outcome::PartiallyAccepted
-    } else if lower.contains("accepted") || lower.contains(": ac") {
+    } else if verdict.starts_with("accepted")
+        || verdict.starts_with("happy new year")
+        || verdict.starts_with("perfect result")
+    {
         Outcome::Accepted
-    } else if result.starts_with("RESULT:") || result.contains("REJECTED") {
-        Outcome::Rejected
     } else {
-        Outcome::Failed
+        Outcome::Rejected
     }
 }
 
@@ -80,7 +91,7 @@ pub struct SubmissionInfo {
     pub submit_url: String,
     pub problem_code: String,
     pub language: &'static str,
-    pub language_id: &'static str,
+    pub language_id: String,
     pub file_name: String,
     pub browser: &'static str,
     pub safari_available: bool,
@@ -113,7 +124,7 @@ fn plan(config: &SubmitConfig) -> Result<(SubmissionInfo, Platform), AppError> {
         submit_url: platform.submit_url.clone(),
         problem_code: platform.problem_code.clone(),
         language: language.label(),
-        language_id: language.cf_id(&config.extra_flags),
+        language_id: config.language_id.clone(),
         file_name: config
             .file_path
             .file_name()
@@ -202,7 +213,8 @@ const CF_FILL_JS: &str = r#"(function() {
                     found = true; break;
                 }
             }
-            if (found) probSelect.dispatchEvent(new Event('change', {bubbles: true}));
+            if (!found) return 'ERROR: problem __PROBLEM_CODE__ is not in this contest\'s problem list';
+            probSelect.dispatchEvent(new Event('change', {bubbles: true}));
         }
 
         // Code injection
@@ -211,11 +223,14 @@ const CF_FILL_JS: &str = r#"(function() {
         try { var ed = document.querySelector('.ace_editor'); if (ed && typeof ace !== 'undefined') ace.edit(ed).setValue(code, -1); } catch(e) {}
 
         // Language selection
+        // Never submit under whatever language happens to be preselected.
         var sel = document.querySelector('select[name="programTypeId"]');
         if (sel) {
+            var langFound = false;
             for (var i = 0; i < sel.options.length; i++) {
-                if (sel.options[i].value === '__LANG_ID__') { sel.value = '__LANG_ID__'; break; }
+                if (sel.options[i].value === '__LANG_ID__') { sel.value = '__LANG_ID__'; langFound = true; break; }
             }
+            if (!langFound) return 'ERROR: Codeforces offers no language id __LANG_ID__ here (set cf_language_ids in ~/.zch/config.json)';
             sel.dispatchEvent(new Event('change', {bubbles: true}));
         }
 
@@ -239,39 +254,107 @@ const CF_FILL_JS: &str = r#"(function() {
     } catch(e) { return 'ERROR: ' + e.message; }
 })();"#;
 
-const CF_RESULT_JS: &str = r#"(function() {
+/// Run on the submit page before submitting: the newest submission id on the
+/// results page. Anything above it afterwards is a new submission.
+const CF_BASELINE_JS: &str = r#"(function() {
     try {
+        var x = new XMLHttpRequest();
+        x.open('GET', '__RESULTS_PATH__', false);
+        x.send(null);
+        if (x.status !== 200) return '0';
+        var doc = new DOMParser().parseFromString(x.responseText, 'text/html');
+        var rows = doc.querySelectorAll('tr[data-submission-id]');
+        var max = 0;
+        for (var i = 0; i < rows.length; i++) {
+            var id = parseInt(rows[i].getAttribute('data-submission-id'), 10) || 0;
+            if (id > max) max = id;
+        }
+        return String(max);
+    } catch (e) { return '0'; }
+})();"#;
+
+/// One verdict poll, answered as `<submission id>|<state>`. The AppleScript
+/// prepends `ZCH_ID` (the id once known) and `ZCH_BASE` (the baseline).
+///
+/// The results page is fetched with a synchronous XHR and parsed off-screen
+/// instead of reloading the tab: no CSS/JS/images per poll, so Codeforces is
+/// far less likely to throttle or challenge us. The row is picked by id —
+/// never "the top row" — so parallel submissions cannot read each other's
+/// verdict, and an old verdict for the same problem is never reported.
+const CF_RESULT_JS: &str = r#"(function() {
+    var known = (typeof ZCH_ID !== 'undefined' && ZCH_ID) ? String(ZCH_ID) : '';
+    try {
+        var base = (typeof ZCH_BASE !== 'undefined') ? (parseInt(ZCH_BASE, 10) || 0) : 0;
+        var target = '__PROBLEM_CODE__';
+        var say = function(state) { return known + '|' + state; };
+        var challenged = function(d) {
+            var t = d.title || '';
+            return t.indexOf('Just a moment') > -1 || t.indexOf('Attention Required') > -1;
+        };
+
+        if (challenged(document)) return say('CAPTCHA');
         var url = document.location.href;
-        var hasCap = false;
-
-        if (document.title.indexOf('Just a moment') > -1 || document.title.indexOf('Attention Required') > -1) hasCap = true;
-        var eSub = document.querySelector('.error.for__submittedProblemCode, .error.for__source');
-        if (eSub && eSub.textContent.toLowerCase().indexOf('captcha') > -1) hasCap = true;
-
         if (url.indexOf('/submit') > -1) {
-            var ws = document.querySelectorAll('.cf-turnstile, #turnstile-wrapper, .g-recaptcha');
-            for (var i = 0; i < ws.length; i++) { if (ws[i].innerHTML.trim() !== '') hasCap = true; }
-            if (document.querySelector('iframe[src*="captcha"], iframe[src*="challenge"], iframe[src*="turnstile"]')) hasCap = true;
-        }
-
-        if (hasCap) return 'CAPTCHA';
-
-        if (document.readyState !== 'complete') return 'WAIT';
-
-        if (eSub) return 'REJECTED: ' + eSub.textContent.trim();
-        var rows = document.querySelectorAll('tr[data-submission-id]');
-        if (rows.length > 0) {
-            var cell = rows[0].querySelector('td.status-verdict-cell, td:nth-child(6), .submissionVerdictWrapper, .verdict-waiting, .verdict-accepted, .verdict-rejected');
-            var vt = cell ? cell.textContent.replace(/\s+/g, ' ').trim() : '';
-            if (!vt || vt.indexOf('Running') > -1 || vt.indexOf('queue') > -1 || vt.indexOf('Judging') > -1 || vt.indexOf('testing') > -1) {
-                return 'RELOAD: ' + (vt || 'In queue');
+            var eSub = document.querySelector('.error.for__submittedProblemCode, .error.for__source');
+            if (eSub && eSub.textContent.trim() !== '') {
+                if (eSub.textContent.toLowerCase().indexOf('captcha') > -1) return say('CAPTCHA');
+                return say('REJECTED: ' + eSub.textContent.trim());
             }
-            return 'RESULT: ' + vt;
+            var ws = document.querySelectorAll('.cf-turnstile, #turnstile-wrapper, .g-recaptcha');
+            for (var w = 0; w < ws.length; w++) { if (ws[w].innerHTML.trim() !== '') return say('CAPTCHA'); }
+            if (document.querySelector('iframe[src*="captcha"], iframe[src*="challenge"], iframe[src*="turnstile"]')) return say('CAPTCHA');
+            return say('WAIT');
         }
-        if (url.indexOf('/my') > -1 || url.indexOf('/status') > -1) return 'RELOAD: Waiting for submission';
-        if (url.indexOf('/submit') > -1) return 'WAIT';
-        return 'WAIT';
-    } catch(e) { return 'WAIT'; }
+
+        var x = new XMLHttpRequest();
+        x.open('GET', '__RESULTS_PATH__', false);
+        x.send(null);
+        if (x.status !== 200) return say('WAIT: results page answered ' + x.status);
+        var doc = new DOMParser().parseFromString(x.responseText, 'text/html');
+        if (challenged(doc)) return say('CAPTCHA_FETCH');
+
+        var codesOf = function(row) {
+            var out = [];
+            var links = row.querySelectorAll('a[href*="/problem/"]');
+            for (var i = 0; i < links.length; i++) {
+                var h = links[i].getAttribute('href') || '';
+                var m = h.match(/\/(?:contest|gym)\/(\d+)\/problem\/([A-Za-z0-9]+)/) ||
+                        h.match(/\/problemset\/problem\/(\d+)\/([A-Za-z0-9]+)/);
+                if (m) { out.push(m[2].toUpperCase()); out.push((m[1] + m[2]).toUpperCase()); }
+            }
+            return out;
+        };
+        var isOurs = function(row) {
+            var codes = codesOf(row);
+            return codes.length === 0 || codes.indexOf(target) > -1;
+        };
+
+        var rows = doc.querySelectorAll('tr[data-submission-id]');
+        var row = null;
+        var bestId = 0;
+        for (var r = 0; r < rows.length; r++) {
+            var id = parseInt(rows[r].getAttribute('data-submission-id'), 10) || 0;
+            if (known) {
+                if (String(id) === known) { row = rows[r]; break; }
+            } else if (isOurs(rows[r])) {
+                // With a baseline: the oldest new submission (ours came first).
+                // Without one: the newest submission for this problem.
+                if (base > 0) {
+                    if (id > base && (row === null || id < bestId)) { row = rows[r]; bestId = id; }
+                } else if (row === null || id > bestId) { row = rows[r]; bestId = id; }
+            }
+        }
+        if (!row) return say('RELOAD: Waiting for submission');
+
+        known = row.getAttribute('data-submission-id') || known;
+        var cell = row.querySelector('td.status-verdict-cell') || row.querySelector('.submissionVerdictWrapper');
+        var vt = cell ? cell.textContent.replace(/\s+/g, ' ').trim() : '';
+        var waiting = cell && cell.getAttribute('waiting') === 'true';
+        if (!vt || waiting || /running|queue|judging|testing|pending/i.test(vt)) {
+            return say('RELOAD: ' + (vt || 'In queue'));
+        }
+        return say('RESULT: ' + vt);
+    } catch (e) { return known + '|WAIT'; }
 })();"#;
 
 // ---------------------------------------------------------------------------
@@ -314,6 +397,11 @@ tell application "__APP__"
         end if
     end repeat
     delay 0.5
+    set baselineJS to read POSIX file "__BASELINE_JS_PATH__"
+    set baseId to "0"
+    try
+        set baseId to (do JavaScript baselineJS in submitTab) as text
+    end try
     set fillJS to read POSIX file "__FILL_JS_PATH__"
     set fillOK to false
     repeat 3 times
@@ -346,8 +434,9 @@ tell application "__APP__"
         end if
         delay 2
     end repeat
-    log "submitted — waiting for the judge's verdict"
+    log "submitted · waiting for the verdict"
     set resultJS to read POSIX file "__RESULT_JS_PATH__"
+    set subId to ""
     set resultInfo to "UNKNOWN: Timed out"
     set resCaptchaAlerted to false
     repeat 120 times
@@ -359,39 +448,38 @@ tell application "__APP__"
         else
             set tabLostPolls to 0
             set submitTab to foundTab
+            set rawInfo to "|WAIT"
             try
-                set resultInfo to do JavaScript resultJS in submitTab
-            on error
-                set resultInfo to "WAIT"
+                set rawInfo to (do JavaScript ("var ZCH_ID='" & subId & "'; var ZCH_BASE='" & baseId & "';" & resultJS) in submitTab) as text
             end try
+            -- The script answers "<submission id>|<state>"; keep the id.
+            set barPos to offset of "|" in rawInfo
+            if barPos is 0 then
+                set resultInfo to rawInfo
+            else
+                if barPos > 1 then set subId to text 1 thru (barPos - 1) of rawInfo
+                if barPos < (length of rawInfo) then
+                    set resultInfo to text (barPos + 1) thru -1 of rawInfo
+                else
+                    set resultInfo to "WAIT"
+                end if
+            end if
 
-            if resultInfo is "CAPTCHA" then
+            if resultInfo is "CAPTCHA" or resultInfo is "CAPTCHA_FETCH" then
                 if resCaptchaAlerted is false then
                     set resCaptchaAlerted to true
+                    -- The challenge came from the background fetch: show it in the tab.
+                    if resultInfo is "CAPTCHA_FETCH" then set URL of submitTab to "__RESULTS_URL__"
                     my alertCaptcha(submitTab)
                 end if
-                log "CAPTCHA: Waiting for you to solve and resubmit..."
+                log "CAPTCHA: Waiting for you to solve it..."
             else
                 log resultInfo
+                set resCaptchaAlerted to false
             end if
 
             if resultInfo starts with "RESULT:" or resultInfo starts with "REJECTED:" then exit repeat
-            if resultInfo starts with "RELOAD:" then
-                try
-                    do JavaScript "window.location.reload()" in submitTab
-                on error
-                    set resultInfo to "WAIT"
-                end try
-                delay 1
-                repeat 30 times
-                    delay 1
-                    try
-                        if (do JavaScript "document.readyState" in submitTab) is "complete" then exit repeat
-                    end try
-                end repeat
-            else
-                delay 2
-            end if
+            delay 2
         end if
     end repeat
     if resultInfo does not start with "RESULT:" and resultInfo does not start with "REJECTED:" then
@@ -481,19 +569,21 @@ fn temp_file(prefix: &str, suffix: &str) -> PathBuf {
     ))
 }
 
+/// One AppleScript log line as plain progress text. Glyphs and colours are
+/// the UI's business: this only says what is happening.
 fn status_for_line(line: &str) -> Option<String> {
-    if let Some(rest) = line.strip_prefix("CAPTCHA:") {
-        Some(format!("⚠ CAPTCHA —{rest}"))
+    if line.starts_with("CAPTCHA") {
+        Some("captcha".to_string())
     } else if let Some(rest) = line.strip_prefix("RELOAD: ") {
-        Some(format!("⌛ {rest}"))
+        Some(rest.trim().to_string())
     } else if line == "WAIT" {
-        Some("⌛ waiting for the page…".to_string())
-    } else if line.starts_with("WAIT") {
-        Some(format!("⌛ {line}"))
-    } else if !line.contains("RESULT") && !line.contains("REJECTED") {
-        Some(format!("● {line}"))
-    } else {
+        Some("waiting for Codeforces".to_string())
+    } else if let Some(rest) = line.strip_prefix("WAIT:") {
+        Some(rest.trim().to_string())
+    } else if line.is_empty() || line.contains("RESULT") || line.contains("REJECTED") {
         None
+    } else {
+        Some(line.to_string())
     }
 }
 
@@ -564,21 +654,29 @@ pub fn submit(
     let code = fs::read_to_string(&config.file_path)
         .map_err(|e| AppError::Io(format!("cannot read {}: {e}", config.file_path.display())))?;
 
-    let language = config.language;
-    let lang_id = language.cf_id(&config.extra_flags);
+    let lang_id = js_literal_safe(&config.language_id);
+    let problem_code = js_literal_safe(&platform.problem_code.to_uppercase());
 
     let clean_code = strip_metadata(&code);
     let code_b64 = BASE64.encode(clean_code.as_bytes());
 
     let fill_js = CF_FILL_JS
         .replace("__CODE_B64__", &code_b64)
-        .replace("__LANG_ID__", lang_id)
-        .replace("__PROBLEM_CODE__", &platform.problem_code.to_uppercase());
-    let result_js = CF_RESULT_JS.to_string();
+        .replace("__LANG_ID__", &lang_id)
+        .replace("__PROBLEM_CODE__", &problem_code);
+    let (_, results_url, _) = tracking(&platform.submit_url);
+    let results_path = results_url
+        .split_once("://")
+        .and_then(|(_, rest)| rest.find('/').map(|i| rest[i..].to_string()))
+        .unwrap_or_else(|| "/".to_string());
+    let baseline_js = CF_BASELINE_JS.replace("__RESULTS_PATH__", &js_literal_safe(&results_path));
+    let result_js = CF_RESULT_JS
+        .replace("__RESULTS_PATH__", &js_literal_safe(&results_path))
+        .replace("__PROBLEM_CODE__", &problem_code);
 
     notify(format!(
-        "Submitting {} as {} to {}",
-        info.file_name, info.language, info.platform
+        "submitting {} as {}",
+        info.file_name, info.language
     ));
 
     let tag = format!(
@@ -588,15 +686,38 @@ pub fn submit(
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     );
-    run_applescript(&platform, &fill_js, &result_js, &tag, notify)
+    let scripts = Scripts {
+        fill: &fill_js,
+        baseline: &baseline_js,
+        result: &result_js,
+    };
+    run_applescript(&platform, scripts, &tag, notify)
 }
 
-fn build_applescript(
-    platform: &Platform,
-    fill_path: &Path,
-    result_path: &Path,
-    tag: &str,
-) -> String {
+/// Values pasted into a single-quoted JS string: anything but plain
+/// URL/identifier characters is dropped, so a crafted URL cannot break out.
+fn js_literal_safe(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || "/?=&._-".contains(*c))
+        .collect()
+}
+
+/// The JavaScript files the AppleScript reads.
+struct Scripts<'a> {
+    fill: &'a str,
+    baseline: &'a str,
+    result: &'a str,
+}
+
+/// Where the AppleScript finds each JavaScript file.
+struct ScriptPaths<'a> {
+    fill: &'a Path,
+    baseline: &'a Path,
+    result: &'a Path,
+}
+
+fn build_applescript(platform: &Platform, paths: &ScriptPaths, tag: &str) -> String {
     // Quotes inside the inline `do JavaScript` string must be escaped for AppleScript.
     let safe_selector = platform.ready_selector.replace('"', "\\\"");
     let (prefix, results_url, results_mark) = tracking(&platform.submit_url);
@@ -608,25 +729,38 @@ fn build_applescript(
         .replace("__RESULTS_URL__", &results_url)
         .replace("__RESULTS_MARK__", results_mark)
         .replace("__READY_SELECTOR__", &safe_selector)
-        .replace("__FILL_JS_PATH__", &fill_path.to_string_lossy())
-        .replace("__RESULT_JS_PATH__", &result_path.to_string_lossy())
+        .replace("__FILL_JS_PATH__", &paths.fill.to_string_lossy())
+        .replace("__BASELINE_JS_PATH__", &paths.baseline.to_string_lossy())
+        .replace("__RESULT_JS_PATH__", &paths.result.to_string_lossy())
 }
 
 fn run_applescript(
     platform: &Platform,
-    fill_js: &str,
-    result_js: &str,
+    scripts: Scripts,
     tag: &str,
     notify: impl Fn(String) + Send + Clone + 'static,
 ) -> Result<String, AppError> {
     let fill_path = temp_file("fill", ".js");
+    let baseline_path = temp_file("baseline", ".js");
     let result_path = temp_file("result", ".js");
     let script_path = temp_file("run", ".applescript");
 
-    fs::write(&fill_path, fill_js).map_err(|e| AppError::Io(e.to_string()))?;
-    fs::write(&result_path, result_js).map_err(|e| AppError::Io(e.to_string()))?;
+    let written = fs::write(&fill_path, scripts.fill)
+        .and_then(|_| fs::write(&baseline_path, scripts.baseline))
+        .and_then(|_| fs::write(&result_path, scripts.result));
+    if let Err(e) = written {
+        for path in [&fill_path, &baseline_path, &result_path] {
+            let _ = fs::remove_file(path);
+        }
+        return Err(AppError::Io(e.to_string()));
+    }
 
-    let script = build_applescript(platform, &fill_path, &result_path, tag);
+    let paths = ScriptPaths {
+        fill: &fill_path,
+        baseline: &baseline_path,
+        result: &result_path,
+    };
+    let script = build_applescript(platform, &paths, tag);
     fs::write(&script_path, script).map_err(|e| AppError::Io(e.to_string()))?;
 
     let result = (|| -> Result<String, AppError> {
@@ -712,6 +846,7 @@ fn run_applescript(
     })();
 
     let _ = fs::remove_file(&fill_path);
+    let _ = fs::remove_file(&baseline_path);
     let _ = fs::remove_file(&result_path);
     let _ = fs::remove_file(&script_path);
 
@@ -765,6 +900,75 @@ mod tests {
     }
 
     #[test]
+    fn pretest_failures_are_rejections() {
+        assert_eq!(
+            classify("RESULT: Wrong answer on pretest 2"),
+            Outcome::Rejected
+        );
+        assert_eq!(
+            classify("RESULT: Time limit exceeded on pretest 1"),
+            Outcome::Rejected
+        );
+        assert_eq!(
+            classify("RESULT: Pretests passed"),
+            Outcome::PartiallyAccepted
+        );
+        assert_eq!(classify("RESULT: Accepted"), Outcome::Accepted);
+        assert_eq!(classify("RESULT: Happy New Year!"), Outcome::Accepted);
+        assert_eq!(classify("RESULT: Compilation error"), Outcome::Rejected);
+        assert_eq!(
+            classify("REJECTED: You have submitted exactly the same code before"),
+            Outcome::Rejected
+        );
+        assert_eq!(
+            classify("ERROR: Codeforces offers no language id 70 here"),
+            Outcome::Failed
+        );
+    }
+
+    #[test]
+    fn values_pasted_into_javascript_cannot_escape_the_string() {
+        assert_eq!(js_literal_safe("A1"), "A1");
+        assert_eq!(js_literal_safe("/contest/1/my"), "/contest/1/my");
+        assert_eq!(
+            js_literal_safe("/problemset/status?my=on"),
+            "/problemset/status?my=on"
+        );
+        assert_eq!(js_literal_safe("A');alert(1);//"), "Aalert1//");
+    }
+
+    /// Syntax-check the injected JavaScript when Node is available.
+    #[test]
+    fn injected_javascript_parses() {
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+        for (name, source) in [
+            ("fill", CF_FILL_JS),
+            ("baseline", CF_BASELINE_JS),
+            ("result", CF_RESULT_JS),
+        ] {
+            assert!(
+                source.is_ascii(),
+                "{name}: AppleScript reads the file as MacRoman"
+            );
+            let path = temp_file(&format!("syntax_{name}"), ".js");
+            fs::write(&path, source).unwrap();
+            let out = Command::new("node")
+                .arg("--check")
+                .arg(&path)
+                .output()
+                .unwrap();
+            let _ = fs::remove_file(&path);
+            assert!(
+                out.status.success(),
+                "{name} does not parse:\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    #[test]
     fn derives_tracking_urls() {
         let (prefix, results, mark) = tracking("https://codeforces.com/contest/2266/submit");
         assert_eq!(prefix, "https://codeforces.com/contest/2266/");
@@ -791,11 +995,26 @@ mod tests {
     fn generated_applescript_compiles() {
         let platform = detect_platform("https://codeforces.com/contest/2266/problem/E").unwrap();
         let fill = temp_file("testfill", ".js");
+        let baseline = temp_file("testbaseline", ".js");
         let result = temp_file("testresult", ".js");
         fs::write(&fill, "1").unwrap();
+        fs::write(&baseline, "1").unwrap();
         fs::write(&result, "1").unwrap();
 
-        let script = build_applescript(&platform, &fill, &result, "zchtest123");
+        let paths = ScriptPaths {
+            fill: &fill,
+            baseline: &baseline,
+            result: &result,
+        };
+        let script = build_applescript(&platform, &paths, "zchtest123");
+        assert!(
+            !script.contains("__"),
+            "every placeholder must be filled:\n{script}"
+        );
+        assert!(
+            !script.contains("window.location.reload"),
+            "verdicts are polled in the background, never by reloading the tab"
+        );
         assert!(
             script.contains("on findSubmitTab(theTab, wantedTag, contestPrefix, resultsMark)"),
             "tab lookup handler missing"
@@ -825,6 +1044,7 @@ mod tests {
             .expect("osacompile should run");
 
         let _ = fs::remove_file(&fill);
+        let _ = fs::remove_file(&baseline);
         let _ = fs::remove_file(&result);
         let _ = fs::remove_file(&script_path);
         let _ = fs::remove_file(&out_path);

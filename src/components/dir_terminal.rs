@@ -1,98 +1,41 @@
-use std::{fs, path::PathBuf};
+//! The working-directory console (`d`): `cd`, `ls`, `pwd`.
+//!
+//! It lives in the header, under the app bar: the folder breadcrumb turns
+//! into a command line in place, and command output (`ls`, completions,
+//! errors) takes the row beneath it — never the run console, so a directory
+//! listing can't be mistaken for a verdict.
+
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 
 use ratatui::{
     Frame,
     crossterm::event::{KeyCode, KeyEvent},
     layout::Rect,
-    style::{Color, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Padding, Paragraph},
+    widgets::{Block, Paragraph},
 };
 use ratatui_textarea::TextArea;
 use unicode_width::UnicodeWidthStr;
 
-use crate::components::{Message, icons, theme, ui};
+use crate::components::{icons, motion, status::Tone, theme, ui};
 
 const HISTORY_LIMIT: usize = 200;
+/// How long the path acknowledges a directory change.
+pub const PATH_GLOW: Duration = Duration::from_millis(1200);
 
-/// Messages may already carry a verdict glyph. Reuse it rather than stacking a
-/// second marker in front of the text.
-const STATUS_GLYPHS: [char; 4] = ['✔', '✘', '⚠', '⏱'];
-
-fn take_status_glyph(text: &str) -> Option<(char, &str)> {
-    let mut chars = text.chars();
-    let glyph = chars.next()?;
-    if !STATUS_GLYPHS.contains(&glyph) {
-        return None;
-    }
-    let rest = chars.as_str();
-    Some((glyph, rest.strip_prefix(' ').unwrap_or(rest)))
-}
-
-fn status_glyph(color: Color) -> char {
-    if color == theme::RED() {
-        '✘'
-    } else if color == theme::GREEN() {
-        '✔'
-    } else if color == theme::YELLOW() {
-        '!'
-    } else if color == theme::CYAN() {
-        '●'
-    } else {
-        '·'
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MessageLane {
-    Live,
-    Result,
-    Error,
-}
-
-#[derive(Default)]
-struct MessageLanes {
-    live: Option<Message>,
-    result: Option<Message>,
-    error: Option<Message>,
-}
-
-impl MessageLanes {
-    fn set(&mut self, lane: MessageLane, message: Message) -> bool {
-        let slot = match lane {
-            MessageLane::Live => &mut self.live,
-            MessageLane::Result => &mut self.result,
-            MessageLane::Error => &mut self.error,
-        };
-        if slot
-            .as_ref()
-            .is_some_and(|current| current.text == message.text && current.color == message.color)
-        {
-            return false;
-        }
-        *slot = Some(message);
-
-        if lane == MessageLane::Result {
-            self.error = None;
-        }
-        true
-    }
-
-    fn clear(&mut self, lane: MessageLane) -> bool {
-        let slot = match lane {
-            MessageLane::Live => &mut self.live,
-            MessageLane::Result => &mut self.result,
-            MessageLane::Error => &mut self.error,
-        };
-        slot.take().is_some()
-    }
-
-    fn active(&self) -> Option<&Message> {
-        self.error
-            .as_ref()
-            .or(self.result.as_ref())
-            .or(self.live.as_ref())
-    }
+/// What the last directory command printed.
+#[derive(Debug, Clone)]
+pub struct DirOutput {
+    pub tone: Tone,
+    /// One-line message (errors, `pwd`).
+    pub text: String,
+    /// Directory entries (`ls`, completion matches): `(is_dir, name)`.
+    pub entries: Vec<(bool, String)>,
 }
 
 struct Completion {
@@ -104,12 +47,9 @@ struct Completion {
 pub struct DirTerminal {
     pub cur_dir: PathBuf,
     pub input_area: TextArea<'static>,
-    /// Compatibility snapshot: the active console message, or the directory
-    /// output when the console is quiet.
-    pub output: Option<Message>,
-    /// Directory command output lives in the path bar, not the console.
-    dir_output: Option<Message>,
-    lanes: MessageLanes,
+    pub output: Option<DirOutput>,
+    /// When the directory last changed, so the header can acknowledge it.
+    pub changed_at: Option<Instant>,
     history: Vec<String>,
     history_cursor: Option<usize>,
     completion: Option<Completion>,
@@ -121,229 +61,110 @@ impl DirTerminal {
             cur_dir: initial_dir,
             input_area: TextArea::default(),
             output: None,
-            dir_output: None,
-            lanes: MessageLanes::default(),
+            changed_at: None,
             history: Vec::new(),
             history_cursor: None,
             completion: None,
         }
     }
 
-    /// Directory command output (`ls`, `pwd`, `cd` errors) belongs to the path
-    /// bar, not the run-result console.
-    pub fn set_message(&mut self, color: Color, text: impl Into<String>) {
-        self.dir_output = Some(Message::new(color, text));
-        self.sync_output();
+    fn say(&mut self, tone: Tone, text: impl Into<String>) {
+        self.output = Some(DirOutput {
+            tone,
+            text: text.into(),
+            entries: Vec::new(),
+        });
     }
 
-    pub fn clear_dir_output(&mut self) {
-        self.dir_output = None;
-        self.sync_output();
+    fn list(&mut self, entries: Vec<(bool, String)>) {
+        self.output = Some(DirOutput {
+            tone: Tone::Info,
+            text: String::new(),
+            entries,
+        });
     }
 
-    fn sync_output(&mut self) {
-        self.output = self
-            .lanes
-            .active()
-            .cloned()
-            .or_else(|| self.dir_output.clone());
+    pub fn clear_output(&mut self) {
+        self.output = None;
     }
 
-    pub fn set_live(&mut self, color: Color, text: impl Into<String>) {
-        self.set_lane(MessageLane::Live, color, text);
-    }
-
-    pub fn set_result(&mut self, color: Color, text: impl Into<String>) {
-        self.set_lane(MessageLane::Result, color, text);
-    }
-
-    pub fn set_error(&mut self, color: Color, text: impl Into<String>) {
-        self.set_lane(MessageLane::Error, color, text);
-    }
-
-    /// Errors stay visible in modes that otherwise show their key hints.
-    pub fn has_error(&self) -> bool {
-        self.lanes.error.is_some()
-    }
-
-    pub fn clear_live(&mut self) {
-        if self.lanes.clear(MessageLane::Live) {
-            self.sync_output();
-        }
-    }
-
-    pub fn clear_result(&mut self) {
-        if self.lanes.clear(MessageLane::Result) {
-            self.sync_output();
-        }
-    }
-
-    pub fn clear_error(&mut self) {
-        if self.lanes.clear(MessageLane::Error) {
-            self.sync_output();
-        }
-    }
-
-    fn set_lane(&mut self, lane: MessageLane, color: Color, text: impl Into<String>) {
-        if self.lanes.set(lane, Message::new(color, text)) {
-            self.sync_output();
-        }
-    }
-
-    /// Height of the working-directory / command bar. One compact row, plus one
-    /// row when a directory command has output to show.
+    /// Rows the path bar takes: the path, plus one while a command has output.
     pub fn input_height(&self) -> u16 {
-        1 + u16::from(self.dir_output.is_some())
+        1 + u16::from(self.output.is_some())
     }
 
-    pub fn draw_input(&mut self, frame: &mut Frame, area: Rect, is_active: bool) {
-        let dir_area = Rect {
-            height: area.height.min(self.input_height()),
-            ..area
-        };
-        if dir_area.height == 0 {
+    /// The path row of the header. Idle, it is a breadcrumb of the folder
+    /// new problems are saved to (`~ › cp › round912`, the current folder
+    /// brightest); with `d` it becomes a command line in place, the
+    /// breadcrumb pinned to the right. Output takes the row beneath.
+    pub fn draw_input(&mut self, frame: &mut Frame, area: Rect, is_active: bool, now: Instant) {
+        if area.height == 0 {
             return;
         }
+        let row = Rect {
+            x: area.x + ui::GUTTER,
+            width: area.width.saturating_sub(ui::GUTTER * 2),
+            height: 1,
+            ..area
+        };
+        // A directory change is acknowledged by the folder glowing and settling.
+        let glow = self
+            .changed_at
+            .map_or(1.0, |at| motion::ease_out(at, PATH_GLOW, now));
 
         if is_active {
-            ui::fill(frame, dir_area, theme::SURFACE_ALT());
-            let prompt_area = Rect {
-                x: dir_area.x + ui::GUTTER,
-                width: 2,
-                height: 1,
-                ..dir_area
-            };
+            let crumbs = breadcrumb(&self.cur_dir, (row.width / 3) as usize, glow);
+            let crumbs_width = crumbs.width() as u16;
+            frame.render_widget(
+                Paragraph::new(crumbs).alignment(ratatui::layout::Alignment::Right),
+                Rect {
+                    x: row.right().saturating_sub(crumbs_width),
+                    width: crumbs_width,
+                    ..row
+                },
+            );
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    format!("{} ", icons::POINTER),
-                    Style::new().fg(theme::ACCENT()).bold(),
-                ))
-                .style(Style::new().bg(theme::SURFACE_ALT())),
-                prompt_area,
+                    format!("{} ", icons::PROMPT),
+                    Style::new().fg(theme::accent()).bold(),
+                )),
+                Rect { width: 2, ..row },
             );
-
-            // Keep the current directory visible while the command is typed.
-            let path = self.cur_dir.display().to_string();
-            let path_width = (path.width() + 2).min((dir_area.width / 2) as usize).max(1) as u16;
-            let path_area = Rect {
-                x: dir_area.x + dir_area.width - path_width - ui::GUTTER,
-                width: path_width,
-                height: 1,
-                ..dir_area
+            let input = Rect {
+                x: row.x + 2,
+                width: row.width.saturating_sub(crumbs_width + 4),
+                ..row
             };
-            frame.render_widget(
-                Paragraph::new(Span::styled(
-                    ui::fit_path(&path, path_width as usize),
-                    Style::new().fg(theme::FAINT()),
-                ))
-                .alignment(ratatui::layout::Alignment::Right)
-                .style(Style::new().bg(theme::SURFACE_ALT())),
-                path_area,
-            );
-
-            let input_x = prompt_area.x + 2;
-            let input_width = path_area.x.saturating_sub(input_x + 1);
-            let input_area = Rect {
-                x: input_x,
-                width: input_width,
-                height: 1,
-                ..dir_area
-            };
-            self.input_area.set_block(
-                Block::default()
-                    .padding(Padding::new(0, 0, 0, 0))
-                    .style(Style::new().bg(theme::SURFACE_ALT())),
-            );
+            self.input_area.set_block(Block::default());
+            self.input_area.set_style(Style::new().fg(theme::text()));
             self.input_area
-                .set_style(Style::new().fg(theme::TEXT()).bg(theme::SURFACE_ALT()));
+                .set_cursor_style(Style::new().add_modifier(Modifier::REVERSED));
+            self.input_area.set_cursor_line_style(Style::new());
+            self.input_area.set_placeholder_text("cd <path>   ls   pwd");
             self.input_area
-                .set_cursor_style(Style::new().add_modifier(ratatui::style::Modifier::REVERSED));
-            if input_area.width > 0 {
-                frame.render_widget(&self.input_area, input_area);
+                .set_placeholder_style(Style::new().fg(theme::faint()));
+            if input.width > 0 {
+                frame.render_widget(&self.input_area, input);
             }
         } else {
-            let bar = Rect {
-                x: dir_area.x + ui::GUTTER,
-                width: dir_area.width.saturating_sub(ui::GUTTER * 2),
-                height: 1,
-                ..dir_area
-            };
-            let path = self.cur_dir.display().to_string();
-            let available = bar.width as usize;
-            let line = Line::from(vec![
-                Span::styled(
-                    format!("{}  ", icons::FOLDER),
-                    Style::new().fg(theme::ACCENT()),
-                ),
-                Span::styled(
-                    ui::fit_path(&path, available.saturating_sub(3)),
-                    Style::new().fg(theme::MUTED()),
-                ),
-            ]);
             frame.render_widget(
-                Paragraph::new(line).style(Style::new().bg(theme::BG())),
-                bar,
+                Paragraph::new(breadcrumb(&self.cur_dir, row.width as usize, glow)),
+                row,
             );
         }
 
-        if dir_area.height > 1 {
-            let output_area = Rect {
-                x: dir_area.x + ui::GUTTER,
-                y: dir_area.y + 1,
-                width: dir_area.width.saturating_sub(ui::GUTTER * 2),
-                height: 1,
+        if area.height > 1
+            && let Some(output) = &self.output
+        {
+            let output_row = Rect {
+                y: area.y + 1,
+                ..row
             };
-            ui::fill(
-                frame,
-                Rect {
-                    y: output_area.y,
-                    height: 1,
-                    ..dir_area
-                },
-                theme::BG(),
+            frame.render_widget(
+                Paragraph::new(output_line(output, output_row.width as usize, now)),
+                output_row,
             );
-            if let Some(message) = &self.dir_output {
-                let text = message.text.lines().collect::<Vec<_>>().join(" ");
-                let glyph = if message.color == theme::RED() {
-                    "✘ "
-                } else if message.color == theme::YELLOW() {
-                    "! "
-                } else {
-                    ""
-                };
-                let width = (output_area.width as usize).saturating_sub(glyph.width());
-                let mut spans = Vec::new();
-                if !glyph.is_empty() {
-                    spans.push(Span::styled(glyph, Style::new().fg(message.color).bold()));
-                }
-                spans.push(Span::styled(
-                    ui::truncate(&text, width),
-                    Style::new().fg(message.color),
-                ));
-                frame.render_widget(
-                    Paragraph::new(Line::from(spans)).style(Style::new().bg(theme::BG())),
-                    output_area,
-                );
-            }
         }
-    }
-
-    /// The single-line run-result console. `None` leaves the bar empty.
-    pub fn console_line(&self, max_width: usize) -> Option<Line<'static>> {
-        let message = self.lanes.active()?;
-        if max_width == 0 {
-            return None;
-        }
-        let text = message.text.lines().collect::<Vec<_>>().join(" ");
-        let (glyph, rest) = match take_status_glyph(&text) {
-            Some((glyph, rest)) => (glyph, rest),
-            None => (status_glyph(message.color), text.as_str()),
-        };
-        let width = max_width.saturating_sub(2);
-        Some(Line::from(vec![
-            Span::styled(format!("{glyph} "), Style::new().fg(message.color).bold()),
-            Span::styled(ui::truncate(rest, width), Style::new().fg(message.color)),
-        ]))
     }
 
     pub fn handle_event(&mut self, key: KeyEvent) -> bool {
@@ -357,7 +178,7 @@ impl DirTerminal {
             KeyCode::Up => self.history_up(),
             KeyCode::Down => self.history_down(),
             KeyCode::Esc => {
-                self.clear_dir_output();
+                self.clear_output();
                 return true;
             }
             _ => {
@@ -377,7 +198,7 @@ impl DirTerminal {
             return;
         }
 
-        self.clear_dir_output();
+        self.clear_output();
 
         if self.history.last() != Some(&cmd) {
             self.history.push(cmd.clone());
@@ -389,50 +210,57 @@ impl DirTerminal {
         if cmd == "cd" || cmd.starts_with("cd ") {
             let target = cmd[2..].trim();
             let new_path = if target.is_empty() {
-                self.cur_dir.clone()
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| self.cur_dir.clone())
+            } else if let Some(rest) = target.strip_prefix("~/") {
+                match std::env::var_os("HOME") {
+                    Some(home) => PathBuf::from(home).join(rest),
+                    None => self.cur_dir.join(target),
+                }
             } else {
                 self.cur_dir.join(target)
             };
 
             match new_path.canonicalize() {
                 Ok(canonical) if canonical.is_dir() => {
+                    if canonical != self.cur_dir {
+                        self.changed_at = Some(Instant::now());
+                    }
                     self.cur_dir = canonical;
                 }
-                Ok(_) => self.set_message(theme::RED(), format!("cd: not a directory: {target}")),
-                Err(_) => {
-                    self.set_message(theme::RED(), format!("cd: no such directory: {target}"))
-                }
+                Ok(_) => self.say(Tone::Error, format!("not a directory — {target}")),
+                Err(_) => self.say(Tone::Error, format!("no such directory — {target}")),
             }
         } else if cmd == "ls" {
             match fs::read_dir(&self.cur_dir) {
                 Ok(entries) => {
-                    let mut names: Vec<String> = entries
+                    let mut names: Vec<(bool, String)> = entries
                         .flatten()
                         .map(|entry| {
-                            let name = entry.file_name().to_string_lossy().to_string();
-                            if entry.path().is_dir() {
-                                format!("{} {name}/", icons::FOLDER)
-                            } else {
-                                format!("{} {name}", icons::FILE)
-                            }
+                            (
+                                entry.path().is_dir(),
+                                entry.file_name().to_string_lossy().to_string(),
+                            )
                         })
+                        .filter(|(_, name)| !name.starts_with('.'))
                         .collect();
-                    names.sort();
-                    let listing = if names.is_empty() {
-                        "empty directory".to_string()
+                    // Folders first, then files, each alphabetically.
+                    names.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+                    if names.is_empty() {
+                        self.say(Tone::Info, "empty directory");
                     } else {
-                        names.join("   ")
-                    };
-                    self.set_message(theme::CYAN(), listing);
+                        self.list(names);
+                    }
                 }
-                Err(e) => self.set_message(theme::RED(), format!("ls: {e}")),
+                Err(e) => self.say(Tone::Error, format!("cannot list this directory — {e}")),
             }
         } else if cmd == "pwd" {
-            self.set_message(theme::CYAN(), self.cur_dir.display().to_string());
+            self.say(Tone::Info, self.cur_dir.display().to_string());
         } else {
-            self.set_message(
-                theme::YELLOW(),
-                format!("unknown command: {cmd} (try: cd <path>, ls, pwd)"),
+            self.say(
+                Tone::Warning,
+                format!("unknown command — {cmd} (try cd, ls or pwd)"),
             );
         }
     }
@@ -501,7 +329,7 @@ impl DirTerminal {
 
         if matches.len() == 1 {
             self.input_area.insert_str("/");
-            self.clear_dir_output();
+            self.clear_output();
         } else {
             self.show_matches(&matches, dir_part);
             self.completion = Some(Completion {
@@ -513,12 +341,12 @@ impl DirTerminal {
     }
 
     fn show_matches(&mut self, matches: &[String], dir_part: &str) {
-        let list = matches
-            .iter()
-            .map(|name| format!("{} {dir_part}{name}/", icons::FOLDER))
-            .collect::<Vec<_>>()
-            .join("   ");
-        self.set_message(theme::CYAN(), list);
+        self.list(
+            matches
+                .iter()
+                .map(|name| (true, format!("{dir_part}{name}")))
+                .collect(),
+        );
     }
 
     fn set_input(&mut self, text: &str) {
@@ -555,6 +383,128 @@ impl DirTerminal {
         }
         self.completion = None;
     }
+}
+
+/// `  ~ › cp › round912`: a folder icon, then the path as segments with the
+/// current folder in the reading colour and its parents muted. When the
+/// path is too long, leading segments give way to `…`. `glow` (0 → 1)
+/// brings the current folder in from the accent after a `cd`.
+fn breadcrumb(path: &Path, width: usize, glow: f32) -> Line<'static> {
+    let shown = path.display().to_string();
+    let shown = match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() && shown.starts_with(&home) => {
+            format!("~{}", &shown[home.len()..])
+        }
+        _ => shown,
+    };
+    let mut segments: Vec<String> = shown
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_string)
+        .collect();
+    if shown.starts_with('/') {
+        segments.insert(0, "/".to_string());
+    }
+
+    const SEPARATOR: &str = " › ";
+    let icon = format!("{}  ", icons::FOLDER_OPEN);
+    let budget = width.saturating_sub(icon.width());
+    let mut dropped = false;
+    let total = |segments: &[String], dropped: bool| {
+        segments.iter().map(|s| s.width()).sum::<usize>()
+            + SEPARATOR.width() * segments.len().saturating_sub(1)
+            + if dropped { 1 + SEPARATOR.width() } else { 0 }
+    };
+    while segments.len() > 1 && total(&segments, dropped) > budget {
+        segments.remove(0);
+        dropped = true;
+    }
+
+    let p = theme::p();
+    let mut spans = vec![Span::styled(icon, Style::new().fg(theme::accent()))];
+    if dropped {
+        spans.push(Span::styled("…", Style::new().fg(theme::faint())));
+        spans.push(Span::styled(SEPARATOR, Style::new().fg(theme::faint())));
+    }
+    let last = segments.len().saturating_sub(1);
+    for (index, segment) in segments.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(SEPARATOR, Style::new().fg(theme::faint())));
+        }
+        let style = if index == last {
+            Style::new().fg(theme::blend(p.accent, p.text, glow)).bold()
+        } else {
+            Style::new().fg(theme::muted())
+        };
+        let budget = budget.max(1);
+        spans.push(Span::styled(ui::truncate(&segment, budget), style));
+    }
+    Line::from(spans)
+}
+
+/// A file's icon and colour, by what kind of file it is.
+fn file_icon(is_dir: bool, name: &str) -> (&'static str, ratatui::style::Color) {
+    if is_dir {
+        return (icons::FOLDER, theme::accent());
+    }
+    let extension = name
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.to_ascii_lowercase());
+    match extension.as_deref() {
+        Some("cpp" | "cc" | "cxx" | "c" | "h" | "hpp") => (icons::CPP, theme::info()),
+        Some("py") => (icons::PYTHON, theme::warning()),
+        Some("java") => (icons::JAVA, theme::error()),
+        Some("rs") => (icons::RUST, theme::warning()),
+        Some("json") => (icons::JSON, theme::warning()),
+        Some("md" | "txt") => (icons::TEXT, theme::muted()),
+        Some("in" | "out" | "ans") => (icons::DATA, theme::purple()),
+        _ => (icons::FILE, theme::faint()),
+    }
+}
+
+/// The output row: a message with its tone's glyph, or a listing as icon +
+/// name pairs, cut off with a count of what did not fit.
+fn output_line(output: &DirOutput, width: usize, now: Instant) -> Line<'static> {
+    if output.entries.is_empty() {
+        return Line::from(vec![
+            Span::styled(
+                format!("{} ", output.tone.glyph(now, now)),
+                Style::new().fg(output.tone.color()).bold(),
+            ),
+            Span::styled(
+                ui::truncate(&output.text, width.saturating_sub(2)),
+                Style::new().fg(theme::text()),
+            ),
+        ]);
+    }
+    let mut spans = Vec::new();
+    let mut used = 0usize;
+    for (index, (is_dir, name)) in output.entries.iter().enumerate() {
+        let (icon, color) = file_icon(*is_dir, name);
+        let name = if *is_dir {
+            format!("{name}/")
+        } else {
+            name.clone()
+        };
+        let cell = format!("{icon} {name}    ");
+        let rest = output.entries.len() - index;
+        let note = format!("+{rest} more");
+        if rest > 1 && used + cell.width() + note.width() > width {
+            spans.push(Span::styled(note, Style::new().fg(theme::faint())));
+            break;
+        }
+        used += cell.width();
+        spans.push(Span::styled(format!("{icon} "), Style::new().fg(color)));
+        spans.push(Span::styled(
+            format!("{name}    "),
+            Style::new().fg(if *is_dir {
+                theme::text()
+            } else {
+                theme::muted()
+            }),
+        ));
+    }
+    Line::from(spans)
 }
 
 /// The longest prefix shared by every match (case-insensitively), rendered
@@ -598,96 +548,48 @@ mod tests {
         terminal.input_area.lines().join("")
     }
 
-    #[test]
-    fn message_lanes_keep_errors_visible_and_results_authoritative() {
-        let mut dir = DirTerminal::new(PathBuf::from("/tmp"));
-
-        dir.set_live(theme::CYAN(), "running case 1/2");
-        dir.set_error(theme::RED(), "network failed");
-        assert_eq!(dir.output.as_ref().unwrap().text, "network failed");
-        assert_eq!(dir.lanes.live.as_ref().unwrap().text, "running case 1/2");
-        assert_eq!(dir.lanes.error.as_ref().unwrap().text, "network failed");
-
-        dir.set_result(theme::GREEN(), "all passed");
-        assert_eq!(dir.lanes.live.as_ref().unwrap().text, "running case 1/2");
-        assert!(
-            dir.lanes.error.is_none(),
-            "a final result supersedes an error"
-        );
-        assert_eq!(dir.output.as_ref().unwrap().text, "all passed");
-        dir.clear_live();
-        assert!(
-            dir.lanes.live.is_none(),
-            "the run lifecycle ends the live phase"
-        );
-
-        dir.set_error(theme::RED(), "submit failed");
-        dir.set_live(theme::CYAN(), "running case 2/2");
-        assert_eq!(
-            dir.output.as_ref().unwrap().text,
-            "submit failed",
-            "a live phase must not erase an error"
-        );
-    }
-
-    fn console_text(dir: &DirTerminal, width: usize) -> String {
-        dir.console_line(width)
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect::<String>()
-            })
-            .unwrap_or_default()
+    fn run(dir: &mut DirTerminal, command: &str) {
+        dir.input_area.insert_str(command);
+        dir.handle_event(key(KeyCode::Enter));
     }
 
     #[test]
-    fn console_renders_the_active_message_on_one_line() {
-        let mut dir = DirTerminal::new(PathBuf::from("/tmp"));
-        dir.set_live(theme::CYAN(), "running case 2/3");
-        assert!(console_text(&dir, 40).contains("running case 2/3"));
+    fn listing_puts_folders_first_and_hides_dotfiles() {
+        let root = temp_dir("ls");
+        fs::create_dir_all(root.join("round912")).unwrap();
+        fs::write(root.join("A.cpp"), "").unwrap();
+        fs::write(root.join(".hidden"), "").unwrap();
+        let mut dir = DirTerminal::new(root.clone());
 
-        dir.set_result(theme::GREEN(), "2/3 passed");
-        let text = console_text(&dir, 40);
-        assert!(text.contains("2/3 passed"));
-        assert!(!text.contains("running case 2/3"));
+        run(&mut dir, "ls");
+        let output = dir.output.as_ref().unwrap();
+        assert_eq!(output.tone, Tone::Info);
+        assert_eq!(
+            output.entries,
+            [(true, "round912".to_string()), (false, "A.cpp".to_string())]
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn console_does_not_stack_glyphs_on_verdict_messages() {
-        let mut dir = DirTerminal::new(PathBuf::from("/tmp"));
-        dir.set_live(theme::CYAN(), "plain status");
-        assert_eq!(
-            console_text(&dir, 40),
-            "● plain status",
-            "a plain message still gets a status glyph"
-        );
+    fn cd_moves_and_errors_say_what_went_wrong() {
+        let root = temp_dir("cd");
+        fs::create_dir_all(root.join("round912")).unwrap();
+        let mut dir = DirTerminal::new(root.clone());
 
-        dir.set_result(theme::GREEN(), "✔ ALL 2/2 PASSED");
-        dir.clear_live();
-        assert_eq!(
-            console_text(&dir, 40),
-            "✔ ALL 2/2 PASSED",
-            "the verdict's own glyph is not duplicated"
-        );
-    }
+        run(&mut dir, "cd round912");
+        assert!(dir.cur_dir.ends_with("round912"));
+        assert!(dir.changed_at.is_some());
+        assert!(dir.output.is_none(), "a successful cd prints nothing");
 
-    #[test]
-    fn console_line_stays_on_one_line_at_every_width() {
-        let mut dir = DirTerminal::new(PathBuf::from("/tmp"));
-        assert!(dir.console_line(120).is_none(), "empty consoles stay quiet");
+        run(&mut dir, "cd nowhere");
+        let output = dir.output.as_ref().unwrap();
+        assert_eq!(output.tone, Tone::Error);
+        assert_eq!(output.text, "no such directory — nowhere");
 
-        dir.set_result(theme::TEXT(), "short");
-        assert_eq!(console_text(&dir, 120), "· short");
-        assert!(console_text(&dir, 10).chars().count() <= 10);
-
-        dir.set_result(theme::TEXT(), "long ".repeat(500));
-        assert_eq!(
-            console_text(&dir, 120).chars().count(),
-            120,
-            "long results truncate instead of resizing the layout"
-        );
-        assert!(console_text(&dir, 10).chars().count() <= 10);
+        run(&mut dir, "frobnicate");
+        assert_eq!(dir.output.as_ref().unwrap().tone, Tone::Warning);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -718,9 +620,15 @@ mod tests {
         dir.handle_event(tab());
         assert_eq!(typed(&dir), "cd cp/qu");
 
-        let listing = &dir.output.as_ref().unwrap().text;
-        assert!(listing.contains("questions"));
-        assert!(listing.contains("quiz"));
+        let names: Vec<_> = dir
+            .output
+            .as_ref()
+            .unwrap()
+            .entries
+            .iter()
+            .map(|(_, name)| name.clone())
+            .collect();
+        assert_eq!(names, ["cp/questions", "cp/quiz"]);
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -765,10 +673,8 @@ mod tests {
         let root = temp_dir("history");
         let mut dir = DirTerminal::new(root.clone());
 
-        dir.input_area.insert_str("ls");
-        dir.handle_event(key(KeyCode::Enter));
-        dir.input_area.insert_str("pwd");
-        dir.handle_event(key(KeyCode::Enter));
+        run(&mut dir, "ls");
+        run(&mut dir, "pwd");
 
         dir.handle_event(key(KeyCode::Up));
         assert_eq!(typed(&dir), "pwd");

@@ -10,11 +10,36 @@ use ratatui::{
     widgets::{ScrollbarOrientation, ScrollbarState},
 };
 
+use std::time::Instant;
+
 use crate::components::{
     ScrollbarDrag, scrollbar, step_wrapped,
-    testcase::{ActiveBox, CaseFocus, PaneKind, TestCase},
+    testcase::{ActiveBox, CaseFocus, CaseVerdict, CaseView, PaneKind, RunState, TestCase},
     theme, ui,
 };
+
+/// Per-frame context the list passes down to its cases.
+pub struct ListLook {
+    /// Show the Normal-mode selection rail.
+    pub selection: bool,
+    /// `Some` while a run is active: the case running now, if any (`None`
+    /// while compiling).
+    pub running: Option<Option<usize>>,
+    pub epoch: Instant,
+    pub now: Instant,
+}
+
+impl ListLook {
+    #[cfg(test)]
+    pub fn idle(now: Instant) -> Self {
+        Self {
+            selection: false,
+            running: None,
+            epoch: now,
+            now,
+        }
+    }
+}
 
 pub struct TestCaseList {
     pub testcases: Vec<TestCase>,
@@ -105,7 +130,7 @@ impl TestCaseList {
         }
     }
 
-    pub fn draw(&mut self, frame: &mut Frame, area: Rect, focus: CaseFocus) {
+    pub fn draw(&mut self, frame: &mut Frame, area: Rect, focus: CaseFocus, look: &ListLook) {
         if area.height == 0 || area.width == 0 {
             self.available_height = 0;
             self.scrollbar_area = Rect::default();
@@ -184,7 +209,7 @@ impl TestCaseList {
                 height: tc_height as u16,
             };
             let mut scratch = Buffer::empty(scratch_area);
-            ui::fill_buf(&mut scratch, scratch_area, theme::BG());
+            ui::fill_buf(&mut scratch, scratch_area, theme::bg());
             let case_focus = if idx == self.active_area {
                 focus
             } else {
@@ -195,7 +220,21 @@ impl TestCaseList {
             } else {
                 ActiveBox::None
             };
-            tc.draw_tc(&mut scratch, scratch_area, idx + 1, active_box, case_focus);
+            let state = match look.running {
+                Some(running) if running == Some(idx) => RunState::Running,
+                Some(_) if matches!(tc.verdict, CaseVerdict::Pending) => RunState::Queued,
+                _ => RunState::Idle,
+            };
+            let view = CaseView {
+                number: idx + 1,
+                focus: case_focus,
+                active_box,
+                selected: look.selection && idx == self.active_area,
+                state,
+                epoch: look.epoch,
+                now: look.now,
+            };
+            tc.draw_tc(&mut scratch, scratch_area, &view);
             if focus == CaseFocus::Delete && case_focus == CaseFocus::None {
                 for cell in scratch.content.iter_mut() {
                     cell.modifier.insert(Modifier::DIM);
@@ -229,6 +268,11 @@ impl TestCaseList {
             let mut scroll_state = ScrollbarState::new(scroll_range).position(self.scroll_row);
             frame.render_stateful_widget(scroll_bar, scrollbar_render_area, &mut scroll_state);
         }
+    }
+
+    /// Whether the scrollbar thumb is being dragged.
+    pub fn is_dragging(&self) -> bool {
+        self.scrollbar_drag.is_some()
     }
 
     pub fn handle_key(&mut self, event: Event, stay_in_case: bool) {
@@ -380,7 +424,6 @@ impl TestCaseList {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::testcase::CaseVerdict;
     use ratatui::{Terminal, backend::TestBackend};
 
     fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
@@ -408,7 +451,14 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
         list.scroll_row = 150;
         terminal
-            .draw(|frame| list.draw(frame, frame.area(), CaseFocus::None))
+            .draw(|frame| {
+                list.draw(
+                    frame,
+                    frame.area(),
+                    CaseFocus::None,
+                    &ListLook::idle(Instant::now()),
+                )
+            })
             .unwrap();
 
         let buffer = terminal.backend().buffer();
@@ -420,7 +470,7 @@ mod tests {
             println!("{screen}");
         }
         assert!(
-            screen.contains("line-145"),
+            screen.contains("line-150"),
             "mid-case rows are visible:\n{screen}"
         );
         assert!(
@@ -437,17 +487,28 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
         terminal
-            .draw(|frame| list.draw(frame, frame.area(), CaseFocus::None))
+            .draw(|frame| {
+                list.draw(
+                    frame,
+                    frame.area(),
+                    CaseFocus::None,
+                    &ListLook::idle(Instant::now()),
+                )
+            })
             .unwrap();
 
         let area = list.scrollbar_area;
         assert!(area.height > 2, "the case list must expose a scrollbar");
         assert_eq!(area.width, 1, "the case-list scrollbar is one cell wide");
         let buffer = terminal.backend().buffer();
+        let thumb_rows = (area.y..area.y + area.height)
+            .filter(|row| buffer[(area.x, *row)].symbol() == "┃")
+            .count();
+        assert!(thumb_rows > 0, "the thumb is drawn");
         for row in area.y..area.y + area.height {
             assert!(
-                matches!(buffer[(area.x, row)].symbol(), "▐" | "│"),
-                "the case-list scrollbar uses quiet rail glyphs"
+                matches!(buffer[(area.x, row)].symbol(), "┃" | " "),
+                "the scrollbar is a thumb on an empty track"
             );
         }
         let bottom = area.y + area.height - 2;
@@ -481,7 +542,14 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
         terminal
-            .draw(|frame| list.draw(frame, frame.area(), CaseFocus::None))
+            .draw(|frame| {
+                list.draw(
+                    frame,
+                    frame.area(),
+                    CaseFocus::None,
+                    &ListLook::idle(Instant::now()),
+                )
+            })
             .unwrap();
         let width_without_scrollbar = list.testcases[0].area.rect.width;
         assert_eq!(list.scrollbar_area, Rect::default());
@@ -491,7 +559,14 @@ mod tests {
             list.testcases.push(TestCase::new(&format!("{index}"), ""));
         }
         terminal
-            .draw(|frame| list.draw(frame, frame.area(), CaseFocus::None))
+            .draw(|frame| {
+                list.draw(
+                    frame,
+                    frame.area(),
+                    CaseFocus::None,
+                    &ListLook::idle(Instant::now()),
+                )
+            })
             .unwrap();
 
         assert_eq!(list.scrollbar_area.width, 1, "the scrollbar is thin");

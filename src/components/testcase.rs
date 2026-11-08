@@ -3,19 +3,40 @@ use std::{
     io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
+    time::Instant,
 };
 
 use ratatui::{
     buffer::Buffer,
     crossterm::event::{MouseButton, MouseEvent, MouseEventKind},
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Padding, Paragraph, Widget},
+    widgets::{Block, Paragraph, Widget},
 };
 use ratatui_textarea::TextArea;
 
-use crate::components::{VisualState, icons, theme, ui};
+use crate::components::{VisualState, icons, motion, status, theme, ui};
+
+/// Where a case stands in the current run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunState {
+    Idle,
+    Queued,
+    Running,
+}
+
+/// Everything a case needs to know to draw itself this frame.
+pub struct CaseView {
+    pub number: usize,
+    pub focus: CaseFocus,
+    pub active_box: ActiveBox,
+    /// The keyboard selection in Normal mode.
+    pub selected: bool,
+    pub state: RunState,
+    pub epoch: Instant,
+    pub now: Instant,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveBox {
@@ -43,22 +64,54 @@ pub enum CaseFocus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaseVerdict {
     Pending,
-    AC { ms: u128 },
-    WA { ms: u128 },
+    AC {
+        ms: u128,
+    },
+    WA {
+        ms: u128,
+    },
     Tle,
     RE,
+    /// Output limit exceeded.
+    Ole,
     CE,
 }
 
 impl CaseVerdict {
-    pub fn color(&self) -> Color {
+    pub fn rgb(&self) -> theme::Rgb {
         match self {
-            CaseVerdict::Pending => theme::MUTED(),
-            CaseVerdict::AC { .. } => theme::GREEN(),
-            CaseVerdict::WA { .. } => theme::RED(),
-            CaseVerdict::Tle => theme::YELLOW(),
-            CaseVerdict::RE => theme::RED(),
-            CaseVerdict::CE => theme::ORANGE(),
+            CaseVerdict::Pending => theme::p().muted,
+            CaseVerdict::AC { .. } => theme::p().success,
+            CaseVerdict::WA { .. } | CaseVerdict::RE | CaseVerdict::Ole => theme::p().error,
+            CaseVerdict::Tle => theme::p().warning,
+            CaseVerdict::CE => theme::p().modified,
+        }
+    }
+
+    /// The one word for this verdict, used on the card, in the status line
+    /// and in the run summary alike. `compact` is for narrow cards.
+    pub fn label(&self, compact: bool) -> &'static str {
+        match (self, compact) {
+            (CaseVerdict::Pending, _) => "",
+            (CaseVerdict::AC { .. }, false) => "accepted",
+            (CaseVerdict::AC { .. }, true) => "ac",
+            (CaseVerdict::WA { .. }, false) => "wrong answer",
+            (CaseVerdict::WA { .. }, true) => "wa",
+            (CaseVerdict::Tle, false) => "time limit exceeded",
+            (CaseVerdict::Tle, true) => "tle",
+            (CaseVerdict::RE, false) => "runtime error",
+            (CaseVerdict::RE, true) => "re",
+            (CaseVerdict::Ole, false) => "output limit exceeded",
+            (CaseVerdict::Ole, true) => "ole",
+            (CaseVerdict::CE, false) => "compilation error",
+            (CaseVerdict::CE, true) => "ce",
+        }
+    }
+
+    pub fn time_ms(&self) -> Option<u128> {
+        match self {
+            CaseVerdict::AC { ms } | CaseVerdict::WA { ms } => Some(*ms),
+            _ => None,
         }
     }
 
@@ -69,7 +122,11 @@ impl CaseVerdict {
     pub fn is_failed(&self) -> bool {
         matches!(
             self,
-            CaseVerdict::WA { .. } | CaseVerdict::Tle | CaseVerdict::RE | CaseVerdict::CE
+            CaseVerdict::WA { .. }
+                | CaseVerdict::Tle
+                | CaseVerdict::RE
+                | CaseVerdict::Ole
+                | CaseVerdict::CE
         )
     }
 }
@@ -258,6 +315,10 @@ pub struct TestCase {
     pub collapse_toggle_area: VisualState,
     pub area: VisualState,
     pub verdict: CaseVerdict,
+    /// Peak memory of the last run, when the platform reports it.
+    pub memory_kb: Option<u64>,
+    /// When the current verdict arrived, for its colour-in.
+    revealed_at: Option<Instant>,
     pub collapsed: bool,
     input_cap: Option<usize>,
     output_cap: Option<usize>,
@@ -286,6 +347,8 @@ impl TestCase {
             collapse_toggle_area: VisualState::new(),
             area: VisualState::new(),
             verdict: CaseVerdict::Pending,
+            memory_kb: None,
+            revealed_at: None,
             collapsed: false,
             input_cap: None,
             output_cap: None,
@@ -319,7 +382,7 @@ impl TestCase {
     }
 
     fn got_lines_uncapped(&self) -> usize {
-        self.got_view().len().max(1)
+        self.got_view(RunState::Idle).len().max(1)
     }
 
     fn input_lines(&self) -> usize {
@@ -342,8 +405,10 @@ impl TestCase {
             .max(self.got_lines_uncapped())
     }
 
+    /// Header, the input label and lines, a gap, the expected/got labels and
+    /// lines, and a gap after the card.
     fn full_height(&self) -> usize {
-        1 + (self.input_lines() + 2) + 1 + (self.output_rows() + 2) + 1
+        CARD_CHROME_ROWS + self.input_lines() + self.output_rows()
     }
 
     /// While editing, the active case may not grow taller than the list
@@ -351,10 +416,7 @@ impl TestCase {
     /// which pane has focus, so pressing Tab does not make Input shrink.
     /// Both panes scroll internally when they need more rows.
     pub fn fit_to_height(&mut self, viewport: usize) {
-        // Header, two pane title strips, the gap between panes and the gap
-        // after the card. Content is split across that remainder:
-        // 1 header + (input + 2) + 1 gap + (output + 2) + 1 trailing gap.
-        let budget = viewport.saturating_sub(7).max(1);
+        let budget = viewport.saturating_sub(CARD_CHROME_ROWS).max(1);
         let input_want = self.input_lines_uncapped();
         let output_want = self.output_rows_uncapped();
         let wanted = input_want.saturating_add(output_want);
@@ -406,6 +468,8 @@ impl TestCase {
         self.got_file = None;
         self.got_version = self.got_version.wrapping_add(1);
         self.verdict = CaseVerdict::Pending;
+        self.memory_kb = None;
+        self.revealed_at = None;
     }
 
     pub fn set_result(&mut self, verdict: CaseVerdict, got: String) {
@@ -438,7 +502,14 @@ impl TestCase {
         self.output_too_large = output_too_large;
         self.got_version = self.got_version.wrapping_add(1);
         self.verdict = verdict;
+        self.revealed_at = Some(Instant::now());
         self.collapsed = verdict.is_ac();
+    }
+
+    /// Whether the verdict is still colouring in.
+    pub fn revealing(&self, now: Instant) -> bool {
+        self.revealed_at
+            .is_some_and(|at| motion::active(at, motion::REVEAL, now))
     }
 
     pub fn got_is_paged(&self) -> bool {
@@ -467,26 +538,24 @@ impl TestCase {
             .enumerate()
             .map(|(offset, line)| {
                 let index = start + offset;
+                let after_stderr = file.stderr_line.is_some_and(|stderr| index > stderr);
                 let mut rendered = if file.stderr_line == Some(index) {
-                    muted("── stderr ──".to_string())
-                } else if diff && file.stderr_line.is_none_or(|stderr| index < stderr) {
+                    stderr_rule()
+                } else if diff && !after_stderr {
                     let expected = expected.get(index).map(String::as_str).unwrap_or("");
                     highlight_got_inner(expected, &line.text, false)
                         .into_iter()
                         .next()
                         .unwrap_or_default()
+                } else if after_stderr {
+                    Line::styled(line.text, self.stderr_style())
                 } else {
-                    let style = if matches!(self.verdict, CaseVerdict::CE | CaseVerdict::RE) {
-                        Style::new().fg(theme::RED())
-                    } else {
-                        Style::new()
-                    };
-                    Line::styled(line.text, style)
+                    Line::styled(line.text, self.stdout_style(file.stderr_line.is_some()))
                 };
                 if line.truncated {
                     rendered
                         .spans
-                        .push(Span::styled("…", Style::new().fg(theme::MUTED()).italic()));
+                        .push(Span::styled("…", Style::new().fg(theme::faint())));
                 }
                 rendered
             })
@@ -517,13 +586,13 @@ impl TestCase {
                 .as_deref()
                 .is_some_and(has_stdout)
                 .then_some(LARGE_OUTPUT_WARNING);
-            return (self.got_view(), warning);
+            return (self.got_view(RunState::Idle), warning);
         }
         let Some(got) = self.dialog_source() else {
-            return (self.got_view(), None);
+            return (self.got_view(RunState::Idle), None);
         };
         if got.is_empty() {
-            return (self.got_view(), None);
+            return (self.got_view(RunState::Idle), None);
         }
         (self.full_got_lines(got), None)
     }
@@ -540,11 +609,7 @@ impl TestCase {
         let mut lines = if matches!(self.verdict, CaseVerdict::WA { .. }) && !stdout.is_empty() {
             highlight_got_full(&self.expected_text(), stdout)
         } else {
-            let style = if matches!(self.verdict, CaseVerdict::CE | CaseVerdict::RE) {
-                Style::new().fg(theme::RED())
-            } else {
-                Style::new()
-            };
+            let style = self.stdout_style(stderr.is_some());
             let mut lines: Vec<Line<'static>> = stdout
                 .lines()
                 .map(|line| Line::styled(line.to_string(), style))
@@ -555,329 +620,241 @@ impl TestCase {
             lines
         };
         if let Some(stderr) = stderr {
-            lines.extend(stderr.lines().map(|line| Line::from(line.to_string())));
+            lines.push(stderr_rule());
+            let style = self.stderr_style();
+            lines.extend(
+                stderr
+                    .lines()
+                    .map(|line| Line::styled(line.to_string(), style)),
+            );
         }
         lines
     }
 
-    pub fn draw_tc(
-        &mut self,
-        buf: &mut Buffer,
-        area: Rect,
-        index: usize,
-        active_box: ActiveBox,
-        focus: CaseFocus,
-    ) {
+    /// One case. Pane labels sit in the gutter under the case number, so the
+    /// content starts on the row right below the header:
+    ///
+    /// ```text
+    /// ▎ 02 ▾ wrong answer                              9 ms · 3.0 MB
+    ///    in  5
+    ///        6
+    ///    exp  10                       ░ 0 ░░░░░░░░░░   (got: a tinted panel)
+    /// ```
+    ///
+    /// The rail marks focus only (selected, editing, delete target); the
+    /// verdict is a word in its colour, which colours in as it arrives.
+    pub fn draw_tc(&mut self, buf: &mut Buffer, area: Rect, view: &CaseView) {
         self.area.rect = area;
-        self.collapse_toggle_area.rect = Rect {
-            x: area.x,
-            y: area.y,
-            width: area.width,
-            height: 1,
-        };
-        if area.width < 5 || area.height == 0 {
-            self.input_box.rect = Rect::default();
-            self.expected_box.rect = Rect::default();
-            self.got_box.rect = Rect::default();
+        self.collapse_toggle_area.rect = Rect { height: 1, ..area };
+        self.input_box.rect = Rect::default();
+        self.expected_box.rect = Rect::default();
+        self.got_box.rect = Rect::default();
+        if area.width < 12 || area.height == 0 {
             return;
         }
 
-        let verdict_color = self.verdict.color();
-        let rail_color = match focus {
-            CaseFocus::Edit => theme::ACCENT(),
-            CaseFocus::Delete => theme::RED(),
-            CaseFocus::None if matches!(self.verdict, CaseVerdict::Pending) => theme::LINE_STRONG(),
-            CaseFocus::None => verdict_color,
+        let rail = match view.focus {
+            CaseFocus::Edit => Some(theme::accent()),
+            CaseFocus::Delete => Some(theme::error()),
+            CaseFocus::None if view.selected => Some(theme::accent()),
+            CaseFocus::None => None,
         };
-        let title_color = match focus {
-            CaseFocus::Edit => theme::ACCENT(),
-            CaseFocus::Delete => theme::RED(),
-            CaseFocus::None => theme::TEXT(),
-        };
-
-        let header = Rect { height: 1, ..area };
-        ui::fill_buf(buf, header, theme::BG());
-        buf.set_style(
-            Rect {
-                x: area.x,
-                y: area.y,
-                width: 1,
-                height: 1,
-            },
-            Style::new().bg(rail_color),
-        );
-
-        let mut left = vec![
-            Span::raw(" "),
-            Span::styled(
-                "CASE ",
-                Style::new().fg(theme::MUTED()).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{index:02}"),
-                Style::new().fg(title_color).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(
-                    " {}",
-                    if self.collapsed {
-                        icons::CHEVRON_RIGHT
-                    } else {
-                        icons::CHEVRON_DOWN
-                    }
-                ),
-                Style::new().fg(theme::FAINT()),
-            ),
-        ];
-        if focus == CaseFocus::Delete {
-            left.push(Span::styled(
-                "   DELETE",
-                Style::new().fg(theme::RED()).add_modifier(Modifier::BOLD),
-            ));
+        if let Some(rail) = rail {
+            let height = if self.collapsed { 1 } else { area.height };
+            for y in area.y..area.y + height.min(area.height) {
+                buf[(area.x, y)]
+                    .set_symbol(icons::RAIL)
+                    .set_style(Style::new().fg(rail));
+            }
         }
-        let right = self.status_line(area.width < 64);
-        ui::row_buf(
-            buf,
-            Rect {
-                x: area.x + 1,
-                width: area.width - 1,
-                ..header
-            },
-            Line::from(left),
-            right,
-        );
 
+        self.draw_header(buf, Rect { height: 1, ..area }, view);
         if self.collapsed {
-            self.input_box.rect = Rect::default();
-            self.expected_box.rect = Rect::default();
-            self.got_box.rect = Rect::default();
             return;
         }
 
-        let input_height = (self.input_lines() + 2) as u16;
-        let output_height = (self.output_rows() + 2) as u16;
-        let input_rect = Rect {
-            x: area.x,
-            y: area.y + 1,
-            width: area.width,
-            height: input_height,
+        let content_x = area.x + CONTENT_INDENT;
+        let content_width = area.width.saturating_sub(CONTENT_INDENT + 1);
+        let input_rows = self.input_lines() as u16;
+        let output_rows = self.output_rows() as u16;
+        let input_y = area.y + 1;
+        let output_y = input_y + input_rows;
+
+        // Expected and got share the row band. Got sits on a tinted panel
+        // with a cell of padding inside, so the two read apart without a
+        // label or a rule between them.
+        let left_width = content_width.saturating_sub(GOT_GAP) / 2;
+        let got_panel_x = content_x + left_width + GOT_GAP;
+
+        // Hit areas take the label too, so a click on "in" focuses input.
+        self.input_box.rect = Rect {
+            x: area.x + 1,
+            y: input_y,
+            width: area.width.saturating_sub(2),
+            height: input_rows,
         };
-        let output_y = input_rect.y + input_height + 1;
-        let split_gap = 1u16;
-        let left_width = area.width.saturating_sub(split_gap) / 2;
-        let expected_rect = Rect {
-            x: area.x,
+        self.expected_box.rect = Rect {
+            x: area.x + 1,
             y: output_y,
-            width: left_width,
-            height: output_height,
+            width: got_panel_x.saturating_sub(area.x + 1),
+            height: output_rows,
         };
-        let got_rect = Rect {
-            x: area.x + left_width + split_gap,
+        self.got_box.rect = Rect {
+            x: got_panel_x,
             y: output_y,
-            width: area.width.saturating_sub(left_width + split_gap),
-            height: output_height,
+            width: area.right().saturating_sub(got_panel_x + 1),
+            height: output_rows,
         };
 
-        self.input_box.rect = input_rect;
-        self.expected_box.rect = expected_rect;
-        self.got_box.rect = got_rect;
-
-        let is_editing = focus == CaseFocus::Edit;
-        let input_active = matches!(active_box, ActiveBox::Input) && is_editing;
-        let expected_active = matches!(active_box, ActiveBox::Expected) && is_editing;
-
-        let input_meta = if self.input_text().is_empty() {
-            "empty".to_string()
-        } else {
-            line_count_label(self.inp_content.lines().len())
-        };
-        let expected_meta = if self.expected_text().is_empty() {
-            "empty".to_string()
-        } else {
-            line_count_label(self.exp_content.lines().len())
-        };
-        let got_meta = match &self.got_content {
-            None => "not run".to_string(),
-            Some(got) if got.is_empty() => "no output".to_string(),
-            Some(_) => line_count_label(self.got_lines()),
-        };
-
+        let editing = view.focus == CaseFocus::Edit;
+        let input_active = editing && view.active_box == ActiveBox::Input;
+        let expected_active = editing && view.active_box == ActiveBox::Expected;
+        gutter_label(buf, area.x, input_y, "inp", input_active);
+        gutter_label(buf, area.x, output_y, "exp", expected_active);
         Self::render_pane(
             buf,
             &mut self.inp_content,
-            input_rect,
-            "Input",
-            &input_meta,
+            Rect {
+                x: content_x,
+                y: input_y,
+                width: content_width,
+                height: input_rows,
+            },
             input_active,
-            is_editing,
-            if input_active {
-                theme::ACCENT()
-            } else {
-                theme::LINE_STRONG()
-            },
-            if input_active {
-                theme::ACCENT()
-            } else {
-                theme::MUTED()
-            },
-            if input_active {
-                theme::SURFACE_ALT()
-            } else {
-                theme::SURFACE()
-            },
-            "type input here…",
+            editing,
+            "type the input",
         );
         Self::render_pane(
             buf,
             &mut self.exp_content,
-            expected_rect,
-            "Expected",
-            &expected_meta,
-            expected_active,
-            is_editing,
-            if expected_active {
-                theme::ACCENT()
-            } else {
-                theme::LINE_STRONG()
-            },
-            if expected_active {
-                theme::ACCENT()
-            } else {
-                theme::MUTED()
-            },
-            if expected_active {
-                theme::SURFACE_ALT()
-            } else {
-                theme::SURFACE()
-            },
-            "no expected output",
-        );
-
-        let got_surface = theme::SURFACE();
-        let got_title = if self.verdict.is_failed() {
-            verdict_color
-        } else {
-            theme::MUTED()
-        };
-        let got_rail = if self.verdict.is_failed() {
-            verdict_color
-        } else {
-            theme::LINE_STRONG()
-        };
-        let content = Self::pane_frame(
-            buf,
-            got_rect,
-            "Got",
-            &got_meta,
-            got_rail,
-            got_title,
-            got_surface,
-        );
-        let got_width = content.width as usize;
-        let got_lines: Vec<Line<'static>> = self
-            .got_view()
-            .into_iter()
-            .map(|line| clip_line(line, got_width))
-            .collect();
-        Paragraph::new(Text::from(got_lines))
-            .style(Style::new().fg(theme::TEXT()).bg(got_surface))
-            .render(content, buf);
-    }
-
-    fn status_line(&self, compact: bool) -> Line<'static> {
-        let (glyph, label, color, elapsed) = match self.verdict {
-            CaseVerdict::Pending => return Line::default(),
-            CaseVerdict::AC { ms } => (
-                "✔",
-                if compact { "AC" } else { "ACCEPTED" },
-                theme::GREEN(),
-                Some(ms),
-            ),
-            CaseVerdict::WA { ms } => (
-                "✘",
-                if compact { "WA" } else { "WRONG ANSWER" },
-                theme::RED(),
-                Some(ms),
-            ),
-            CaseVerdict::Tle => (
-                "!",
-                if compact { "TLE" } else { "TIME LIMIT" },
-                theme::YELLOW(),
-                None,
-            ),
-            CaseVerdict::RE => (
-                "✘",
-                if compact { "RE" } else { "RUNTIME ERROR" },
-                theme::RED(),
-                None,
-            ),
-            CaseVerdict::CE => (
-                "✘",
-                if compact { "CE" } else { "COMPILE ERROR" },
-                theme::ORANGE(),
-                None,
-            ),
-        };
-        let mut spans = vec![
-            Span::styled(format!("{glyph} "), Style::new().fg(color).bold()),
-            Span::styled(label.to_string(), Style::new().fg(color).bold()),
-        ];
-        if let Some(ms) = elapsed {
-            spans.push(Span::styled(
-                format!("  {ms} ms"),
-                Style::new().fg(theme::FAINT()),
-            ));
-        }
-        Line::from(spans)
-    }
-
-    /// Paints a pane and its one-row title strip, returning the content area.
-    #[allow(clippy::too_many_arguments)]
-    fn pane_frame(
-        buf: &mut Buffer,
-        rect: Rect,
-        title: &str,
-        meta: &str,
-        rail: Color,
-        title_color: Color,
-        surface: Color,
-    ) -> Rect {
-        if rect.width < 4 || rect.height == 0 {
-            return Rect::default();
-        }
-        ui::fill_buf(buf, rect, surface);
-        buf.set_style(
             Rect {
-                x: rect.x,
-                y: rect.y,
-                width: 1,
-                height: rect.height,
+                x: content_x,
+                y: output_y,
+                width: left_width,
+                height: output_rows,
             },
-            Style::new().bg(rail),
+            expected_active,
+            editing,
+            "type the expected output",
         );
-        let title_area = Rect {
-            x: rect.x + 2,
-            y: rect.y,
-            width: rect.width.saturating_sub(3),
-            height: 1,
+
+        let panel = self.got_box.rect.intersection(area);
+        if panel.width > GOT_PAD * 2 {
+            ui::fill_buf(buf, panel, theme::panel());
+            let got = Rect {
+                x: panel.x + GOT_PAD,
+                width: panel.width - GOT_PAD * 2,
+                ..panel
+            };
+            let got_lines: Vec<Line<'static>> = self
+                .got_view(view.state)
+                .into_iter()
+                .map(|line| clip_line(line, got.width as usize))
+                .collect();
+            Paragraph::new(Text::from(got_lines))
+                .style(Style::new().fg(theme::text()))
+                .render(got, buf);
+        }
+    }
+
+    fn draw_header(&self, buf: &mut Buffer, row: Rect, view: &CaseView) {
+        let number_style = match view.focus {
+            CaseFocus::Delete => Style::new().fg(theme::error()).bold(),
+            CaseFocus::Edit => Style::new().fg(theme::text()).bold(),
+            CaseFocus::None if view.selected => Style::new().fg(theme::text()).bold(),
+            CaseFocus::None => Style::new().fg(theme::muted()),
+        };
+        let chevron = if self.collapsed {
+            icons::COLLAPSED
+        } else {
+            icons::EXPANDED
+        };
+        let compact = row.width < 56;
+        let mut left = vec![
+            Span::styled(format!("{:02} ", view.number), number_style),
+            Span::styled(format!("{chevron} "), Style::new().fg(theme::faint())),
+        ];
+        match (self.verdict, view.state) {
+            (CaseVerdict::Pending, RunState::Running) => {
+                left.push(Span::styled(
+                    format!("{} ", motion::spinner(view.epoch, view.now)),
+                    Style::new().fg(theme::accent()),
+                ));
+                left.push(Span::styled("running", Style::new().fg(theme::muted())));
+            }
+            (CaseVerdict::Pending, RunState::Queued) => {
+                left.push(Span::styled("queued", Style::new().fg(theme::faint())));
+            }
+            (CaseVerdict::Pending, RunState::Idle) => {}
+            (verdict, _) => {
+                let reveal = self
+                    .revealed_at
+                    .map_or(1.0, |at| motion::ease_out(at, motion::REVEAL, view.now));
+                left.push(Span::styled(
+                    verdict.label(compact),
+                    Style::new()
+                        .fg(theme::blend(theme::p().muted, verdict.rgb(), reveal))
+                        .bold(),
+                ));
+            }
+        }
+
+        let right = if view.focus == CaseFocus::Delete {
+            Line::from(Span::styled(
+                "delete?",
+                Style::new().fg(theme::error()).bold(),
+            ))
+        } else {
+            let mut facts = Vec::new();
+            if let Some(ms) = self.verdict.time_ms() {
+                facts.push(status::format_ms(ms));
+            }
+            if let Some(kb) = self.memory_kb
+                && !compact
+            {
+                facts.push(format_memory(kb));
+            }
+            Line::from(Span::styled(
+                facts.join(" · "),
+                Style::new().fg(theme::faint()),
+            ))
         };
         ui::row_buf(
             buf,
-            title_area,
-            Line::from(Span::styled(
-                meta.to_string(),
-                Style::new().fg(theme::FAINT()),
-            )),
-            Line::from(Span::styled(
-                title.to_uppercase(),
-                Style::new().fg(title_color).bold(),
-            )),
+            Rect {
+                x: row.x + 2,
+                width: row.width.saturating_sub(3),
+                ..row
+            },
+            Line::from(left),
+            right,
         );
-        Rect {
-            x: rect.x + 2,
-            y: rect.y + 1,
-            width: rect.width.saturating_sub(3),
-            height: rect.height.saturating_sub(2),
+    }
+
+    /// Whether this verdict's output explains a failure (RE, CE, TLE, OLE).
+    fn reports_error(&self) -> bool {
+        matches!(
+            self.verdict,
+            CaseVerdict::RE | CaseVerdict::CE | CaseVerdict::Tle | CaseVerdict::Ole
+        )
+    }
+
+    /// stdout is the answer, so it stays in the reading colour, unless an
+    /// error verdict has no separate stderr and the text *is* the error.
+    fn stdout_style(&self, has_stderr: bool) -> Style {
+        if self.reports_error() && !has_stderr {
+            Style::new().fg(theme::error())
+        } else {
+            Style::new()
+        }
+    }
+
+    /// stderr: the error itself on a failing verdict, debug notes otherwise.
+    fn stderr_style(&self) -> Style {
+        if self.reports_error() {
+            Style::new().fg(theme::error())
+        } else {
+            Style::new().fg(theme::muted())
         }
     }
 
@@ -901,18 +878,23 @@ impl TestCase {
     /// Large WA outputs take the plain preview path: diffing even the capped
     /// preview on every redraw is not worth it, and the user still sees the
     /// first screenful plus a clear truncation note.
-    fn got_view(&self) -> Vec<Line<'static>> {
+    fn got_view(&self, state: RunState) -> Vec<Line<'static>> {
         let Some(got) = &self.got_content else {
+            let hint = match state {
+                RunState::Running => "running…",
+                RunState::Queued => "waiting for its turn",
+                RunState::Idle => "not run yet",
+            };
             return vec![Line::from(Span::styled(
-                "run tests [r] to see the output",
-                Style::new().fg(theme::MUTED()).italic(),
+                hint,
+                Style::new().fg(theme::faint()),
             ))];
         };
 
         if got.is_empty() {
             return vec![Line::from(Span::styled(
-                "(no output)",
-                Style::new().fg(theme::MUTED()).italic(),
+                "no output",
+                Style::new().fg(theme::faint()),
             ))];
         }
 
@@ -925,11 +907,9 @@ impl TestCase {
             let expected = self.expected_text();
             highlight_got(&expected, &stdout.text)
         } else {
-            let style = if matches!(self.verdict, CaseVerdict::CE | CaseVerdict::RE) {
-                Style::new().fg(theme::RED())
-            } else {
-                Style::new()
-            };
+            // With no stderr section, an error verdict's whole text is the
+            // error (a compiler message, the time-limit report).
+            let style = self.stdout_style(stderr.is_some());
             let mut lines: Vec<Line<'static>> = stdout
                 .text
                 .lines()
@@ -942,7 +922,18 @@ impl TestCase {
         };
 
         if let Some(stderr) = &stderr {
-            lines.extend(stderr.text.lines().map(|line| Line::from(line.to_string())));
+            // stdout is the answer; stderr is commentary, kept visibly apart.
+            if stdout.text.is_empty() && lines.len() == 1 && lines[0].width() == 0 {
+                lines.clear();
+            }
+            lines.push(stderr_rule());
+            let style = self.stderr_style();
+            lines.extend(
+                stderr
+                    .text
+                    .lines()
+                    .map(|line| Line::styled(line.to_string(), style)),
+            );
         }
 
         let skipped_diff =
@@ -963,21 +954,14 @@ impl TestCase {
         lines
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn render_pane(
+    fn render_pane(
         buf: &mut Buffer,
         textarea: &mut TextArea<'static>,
-        rect: Rect,
-        title: &str,
-        meta: &str,
+        content: Rect,
         is_active: bool,
         is_editing: bool,
-        rail: Color,
-        title_color: Color,
-        surface: Color,
         placeholder: &str,
     ) {
-        let content = Self::pane_frame(buf, rect, title, meta, rail, title_color, surface);
         if content.width == 0 || content.height == 0 {
             return;
         }
@@ -986,32 +970,50 @@ impl TestCase {
         // positions the terminal cursor on render, so rendering another TextArea
         // after it would steal the cursor.
         if is_editing && is_active {
-            textarea.set_style(Style::new().fg(theme::TEXT()).bg(surface));
+            textarea.set_style(Style::new().fg(theme::text()));
             textarea.set_cursor_style(Style::new().add_modifier(Modifier::REVERSED));
-            textarea.set_block(
-                Block::default()
-                    .style(Style::new().bg(surface))
-                    .padding(Padding::new(0, 0, 0, 0)),
-            );
+            textarea.set_cursor_line_style(Style::new());
+            textarea.set_placeholder_text(placeholder);
+            textarea.set_placeholder_style(Style::new().fg(theme::faint()));
+            textarea.set_block(Block::default());
             textarea.render(content, buf);
         } else {
             let text = textarea.lines().join("\n");
             let panel = if text.trim().is_empty() {
-                Paragraph::new(Line::from(Span::styled(
-                    placeholder,
-                    Style::new().fg(theme::MUTED()).italic(),
-                )))
-                .style(Style::new().bg(surface))
+                Paragraph::new(Span::styled("empty", Style::new().fg(theme::faint())))
             } else {
                 let width = content.width as usize;
                 let lines: Vec<Line<'static>> = pane_lines(&text)
                     .into_iter()
                     .map(|line| clip_line(line, width))
                     .collect();
-                Paragraph::new(Text::from(lines)).style(Style::new().fg(theme::TEXT()).bg(surface))
+                Paragraph::new(Text::from(lines)).style(Style::new().fg(theme::text()))
             };
             panel.render(content, buf);
         }
+    }
+
+    /// Where each pane's text was drawn last frame (input, expected, got),
+    /// without the labels: what a mouse selection in that pane may cover.
+    pub fn text_regions(&self) -> [Rect; 3] {
+        let label = CONTENT_INDENT - 1;
+        let shift = |rect: Rect, by: u16, trim: u16| {
+            if rect.width <= by + trim {
+                return Rect::default();
+            }
+            Rect {
+                x: rect.x + by,
+                width: rect.width - by - trim,
+                ..rect
+            }
+        };
+        [
+            shift(self.input_box.rect, label, 0),
+            // The gap before the got panel closes the expected pane.
+            shift(self.expected_box.rect, label, GOT_GAP),
+            // Inside the got panel's padding.
+            shift(self.got_box.rect, GOT_PAD, GOT_PAD),
+        ]
     }
 
     pub fn handle_mouse(&mut self, mouse: &MouseEvent) -> bool {
@@ -1053,23 +1055,70 @@ const LARGE_OUTPUT_WARNING: &str = "Output is too large to show fully. Showing a
 pub(crate) const PAGED_OUTPUT_NOTE: &str = "Large output · paged view · diff is computed per page";
 /// A WA diff is only useful on a screenful. Larger previews are shown plain.
 const WA_DIFF_MAX_CHARS: usize = 8_000;
-const COLLAPSED_HEIGHT: usize = 2;
+/// A collapsed case is a single row, so a run of accepted cases reads as a
+/// compact table.
+const COLLAPSED_HEIGHT: usize = 1;
+/// Space between the expected text and the got panel.
+const GOT_GAP: u16 = 2;
+/// Padding inside the got panel, left and right.
+const GOT_PAD: u16 = 1;
+
+/// A pane label in the gutter under the case number (`01 ▾`), centred in
+/// it. The pane being edited gets the accent.
+fn gutter_label(buf: &mut Buffer, card_x: u16, y: u16, label: &str, active: bool) {
+    let style = if active {
+        Style::new().fg(theme::accent()).bold()
+    } else {
+        Style::new().fg(theme::faint())
+    };
+    let width = label.chars().count() as u16;
+    // The gutter runs from after the rail to the cell before the content.
+    let gutter = CONTENT_INDENT - 2;
+    let x = card_x + 1 + gutter.saturating_sub(width).div_ceil(2);
+    Paragraph::new(Span::styled(label.to_string(), style)).render(
+        Rect {
+            x,
+            y,
+            width,
+            height: 1,
+        },
+        buf,
+    );
+}
+/// The header and the gap after the card; labels live in the gutter.
+const CARD_CHROME_ROWS: usize = 2;
+/// Content starts under the verdict word: rail, gap, `02 `, `▾ `.
+const CONTENT_INDENT: u16 = 7;
 pub(crate) const OUTPUT_TRUNCATED_NOTE: &str = "… output truncated";
 const DIFF_SKIPPED_NOTE: &str = "… diff skipped for large output";
 
 /// Separates a case's stdout from the stderr that `helper` appends to it.
 pub(crate) const STDERR_MARKER: &str = "\n── stderr ──\n";
 
+/// `812 KB`, `3.4 MB`, `256 MB`.
+pub(crate) fn format_memory(kb: u64) -> String {
+    if kb < 1024 {
+        format!("{kb} KB")
+    } else if kb < 100 * 1024 {
+        format!("{:.1} MB", kb as f64 / 1024.0)
+    } else {
+        format!("{} MB", kb / 1024)
+    }
+}
+
+/// Characters that differ from the expected answer: red on a dark red wash,
+/// so the mismatch is visible even where the glyph is a space.
 fn extra_style() -> Style {
-    Style::new().fg(theme::RED())
+    Style::new().fg(theme::error()).bg(theme::diff())
 }
 
+/// A note the pane adds about itself (truncation, skipped diff).
 fn muted(text: String) -> Line<'static> {
-    Line::from(Span::styled(text, Style::new().fg(theme::MUTED()).italic()))
+    Line::from(Span::styled(text, Style::new().fg(theme::faint())))
 }
 
-fn line_count_label(count: usize) -> String {
-    format!("{count} line{}", if count == 1 { "" } else { "s" })
+fn stderr_rule() -> Line<'static> {
+    Line::from(Span::styled("── stderr", Style::new().fg(theme::faint())))
 }
 
 fn split_stderr(got: &str) -> (&str, Option<&str>) {
@@ -1217,7 +1266,7 @@ fn clip_line(line: Line<'static>, max_width: usize) -> Line<'static> {
             _ => spans.push(Span::styled(grapheme.symbol.to_string(), grapheme.style)),
         }
     }
-    spans.push(Span::styled("…", Style::new().fg(theme::MUTED())));
+    spans.push(Span::styled("…", Style::new().fg(theme::faint())));
     Line::from(spans)
 }
 
@@ -1347,19 +1396,19 @@ mod tests {
     #[test]
     fn height_tracks_content_and_collapse() {
         let mut tc = TestCase::new("1 2", "3");
-        // Header, Input pane with its title strip, and the Expected/Got row.
-        assert_eq!(tc.row_height(), 9);
+        // Header, 1 input line, 1 output line, the gap after the card.
+        assert_eq!(tc.row_height(), 4);
 
         tc.inp_content.insert_str("\n4 5");
-        assert_eq!(tc.row_height(), 10);
+        assert_eq!(tc.row_height(), 5);
 
         tc.set_result(CaseVerdict::WA { ms: 1 }, "0\n1\n2".into());
-        assert_eq!(tc.row_height(), 12);
+        assert_eq!(tc.row_height(), 7);
 
-        // Collapsing snaps to the padded collapsed height (title + gap row).
+        // An accepted case folds to a single row.
         tc.set_result(CaseVerdict::AC { ms: 1 }, "3".into());
         assert!(tc.collapsed);
-        assert_eq!(tc.row_height(), 2);
+        assert_eq!(tc.row_height(), 1);
     }
 
     #[test]
@@ -1381,176 +1430,194 @@ mod tests {
         assert_eq!(tc.row_height(), full);
     }
 
+    fn view(focus: CaseFocus, active_box: ActiveBox, selected: bool, state: RunState) -> CaseView {
+        // A reveal that finished long ago: colours are at rest.
+        let now = Instant::now() + std::time::Duration::from_secs(5);
+        CaseView {
+            number: 1,
+            focus,
+            active_box,
+            selected,
+            state,
+            epoch: now,
+            now,
+        }
+    }
+
+    fn draw(tc: &mut TestCase, view: &CaseView) -> (Buffer, String) {
+        let area = Rect::new(0, 0, 80, tc.row_height() as u16);
+        let mut buffer = Buffer::empty(area);
+        tc.draw_tc(&mut buffer, area, view);
+        let title: String = (0..area.width).map(|x| buffer[(x, 0)].symbol()).collect();
+        (buffer, title)
+    }
+
     #[test]
-    fn delete_focus_marks_the_title_and_keeps_the_verdict_color() {
+    fn the_rail_marks_focus_only() {
         let mut tc = TestCase::new("1", "2");
         tc.set_result(CaseVerdict::WA { ms: 1 }, "0".into());
         tc.collapsed = false;
-        let area = Rect::new(0, 0, 80, 12);
-        let mut buffer = Buffer::empty(area);
-        tc.draw_tc(&mut buffer, area, 1, ActiveBox::None, CaseFocus::Delete);
 
-        let title: String = (0..area.width).map(|x| buffer[(x, 0)].symbol()).collect();
-        let delete_x = title.find("DELETE").expect("delete label") as u16;
-        assert_eq!(buffer[(delete_x, 0)].fg, theme::RED());
-        assert!(
-            title.contains("01") && title.contains(icons::CHEVRON_DOWN),
-            "{title}"
+        let (buffer, _) = draw(
+            &mut tc,
+            &view(CaseFocus::None, ActiveBox::None, false, RunState::Idle),
         );
         assert_eq!(
-            buffer[(area.x, area.y)].bg,
-            theme::RED(),
-            "the card rail turns red for the delete target"
+            buffer[(0, 0)].symbol(),
+            " ",
+            "a verdict alone draws no rail"
+        );
+
+        let (buffer, _) = draw(
+            &mut tc,
+            &view(CaseFocus::None, ActiveBox::None, true, RunState::Idle),
+        );
+        assert_eq!(buffer[(0, 0)].symbol(), icons::RAIL);
+        assert_eq!(
+            buffer[(0, 0)].fg,
+            theme::accent(),
+            "selection is the accent"
+        );
+
+        let (buffer, title) = draw(
+            &mut tc,
+            &view(CaseFocus::Delete, ActiveBox::None, false, RunState::Idle),
         );
         assert_eq!(
-            buffer[(tc.got_box.rect.x, tc.got_box.rect.y)].bg,
-            theme::RED(),
-            "a WA card keeps its red Got rail while it is the delete target"
+            buffer[(0, 0)].fg,
+            theme::error(),
+            "the delete target is red"
         );
+        assert!(title.contains("delete?"), "{title}");
+        let height = tc.row_height() as u16;
         assert_eq!(
-            buffer[(tc.input_box.rect.x, tc.input_box.rect.y)].bg,
-            theme::LINE_STRONG(),
-            "the editable panes stay neutral on a focused card"
+            buffer[(0, height - 1)].symbol(),
+            icons::RAIL,
+            "an expanded card's rail runs its full height"
         );
     }
 
     #[test]
-    fn verdict_colors_the_card_rail_and_got_rail() {
-        for (verdict, expected, got_rail, label) in [
-            (
-                CaseVerdict::Pending,
-                theme::LINE_STRONG(),
-                theme::LINE_STRONG(),
-                None,
-            ),
-            (
-                CaseVerdict::AC { ms: 1 },
-                theme::GREEN(),
-                theme::LINE_STRONG(),
-                Some("ACCEPTED"),
-            ),
-            (
-                CaseVerdict::WA { ms: 1 },
-                theme::RED(),
-                theme::RED(),
-                Some("WRONG ANSWER"),
-            ),
-            (
-                CaseVerdict::Tle,
-                theme::YELLOW(),
-                theme::YELLOW(),
-                Some("TIME LIMIT"),
-            ),
-            (
-                CaseVerdict::RE,
-                theme::RED(),
-                theme::RED(),
-                Some("RUNTIME ERROR"),
-            ),
-            (
-                CaseVerdict::CE,
-                theme::ORANGE(),
-                theme::ORANGE(),
-                Some("COMPILE ERROR"),
-            ),
+    fn each_verdict_is_one_word_in_its_colour() {
+        for (verdict, word, rgb) in [
+            (CaseVerdict::AC { ms: 4 }, "accepted", theme::p().success),
+            (CaseVerdict::WA { ms: 4 }, "wrong answer", theme::p().error),
+            (CaseVerdict::Tle, "time limit", theme::p().warning),
+            (CaseVerdict::RE, "runtime error", theme::p().error),
+            (CaseVerdict::Ole, "output limit", theme::p().error),
+            (CaseVerdict::CE, "compile error", theme::p().modified),
         ] {
             let mut tc = TestCase::new("1", "2");
-            if !matches!(verdict, CaseVerdict::Pending) {
-                tc.set_result(verdict, "0".into());
-                tc.collapsed = false;
-            }
-            let area = Rect::new(0, 0, 80, 12);
-            let mut buffer = Buffer::empty(area);
-            tc.draw_tc(&mut buffer, area, 1, ActiveBox::None, CaseFocus::None);
-
-            assert_eq!(
-                buffer[(area.x, area.y)].bg,
-                expected,
-                "{verdict:?} colors the card rail"
+            tc.set_result(verdict, "0".into());
+            let (buffer, title) = draw(
+                &mut tc,
+                &view(CaseFocus::None, ActiveBox::None, false, RunState::Idle),
             );
-            assert_eq!(
-                buffer[(tc.got_box.rect.x, tc.got_box.rect.y)].bg,
-                got_rail,
-                "{verdict:?} colors the Got rail"
-            );
-            assert_eq!(
-                buffer[(tc.input_box.rect.x, tc.input_box.rect.y)].bg,
-                theme::LINE_STRONG(),
-                "the editable panes stay neutral"
-            );
-
-            let title: String = (0..area.width).map(|x| buffer[(x, 0)].symbol()).collect();
-            match label {
-                Some(label) => {
-                    let x = title.find(label).expect("verdict label") as u16;
-                    assert_eq!(
-                        buffer[(x, 0)].fg,
-                        expected,
-                        "{verdict:?} colors its status label"
-                    );
-                }
-                None => assert!(!title.contains("ACCEPTED")),
+            let x = title
+                .find(word)
+                .unwrap_or_else(|| panic!("{word} in {title}")) as u16;
+            assert_eq!(buffer[(x, 0)].fg, theme::paint(rgb), "{verdict:?}");
+            if verdict.time_ms().is_some() {
+                assert!(title.contains("4 ms"), "{title}");
             }
         }
     }
 
     #[test]
-    fn editing_uses_accent_focus() {
+    fn a_fresh_verdict_colours_in() {
         let mut tc = TestCase::new("1", "2");
         tc.set_result(CaseVerdict::WA { ms: 1 }, "0".into());
-        let area = Rect::new(0, 0, 80, 12);
-        let mut buffer = Buffer::empty(area);
-        tc.draw_tc(&mut buffer, area, 1, ActiveBox::Input, CaseFocus::Edit);
-
-        let title: String = (0..area.width).map(|x| buffer[(x, 0)].symbol()).collect();
-        let index_x = title.find("01").expect("case number") as u16;
-        assert_eq!(
-            buffer[(index_x, 0)].fg,
-            theme::ACCENT(),
-            "the active case number is accent blue"
-        );
-        assert_eq!(
-            buffer[(area.x, area.y)].bg,
-            theme::ACCENT(),
-            "the focused card rail is accent blue"
-        );
-        assert_eq!(
-            buffer[(tc.input_box.rect.x, tc.input_box.rect.y)].bg,
-            theme::ACCENT(),
-            "the focused pane rail is accent blue"
-        );
-        assert_eq!(
-            buffer[(tc.expected_box.rect.x, tc.expected_box.rect.y)].bg,
-            theme::LINE_STRONG(),
-            "the other editable pane keeps a neutral rail"
-        );
-        assert_eq!(
-            buffer[(tc.got_box.rect.x, tc.got_box.rect.y)].bg,
-            theme::RED(),
-            "the Got pane keeps its verdict color"
-        );
-        let status_x = title.find("WRONG ANSWER").expect("verdict label") as u16;
-        assert_eq!(buffer[(status_x, 0)].fg, theme::RED());
+        tc.collapsed = false;
+        let now = Instant::now();
+        let fresh = CaseView {
+            now,
+            epoch: now,
+            ..view(CaseFocus::None, ActiveBox::None, false, RunState::Idle)
+        };
+        let (buffer, title) = draw(&mut tc, &fresh);
+        let x = title.find("wrong answer").unwrap() as u16;
+        if motion::enabled() {
+            assert_ne!(buffer[(x, 0)].fg, theme::error(), "starts from muted");
+        }
+        assert!(tc.revealing(now) || !motion::enabled());
+        assert!(!tc.revealing(now + motion::REVEAL));
     }
 
     #[test]
-    fn case_title_is_plain_before_a_run() {
+    fn running_and_queued_cases_say_so() {
         let mut tc = TestCase::new("1", "2");
-        let area = Rect::new(0, 0, 80, 12);
-        let mut buffer = Buffer::empty(area);
-        tc.draw_tc(&mut buffer, area, 1, ActiveBox::None, CaseFocus::None);
-
-        let title: String = (0..area.width).map(|x| buffer[(x, 0)].symbol()).collect();
-        let index_x = title.find("01").expect("case number") as u16;
-        assert_eq!(
-            buffer[(index_x, 0)].fg,
-            theme::TEXT(),
-            "the case name stays plain text"
+        let (_, title) = draw(
+            &mut tc,
+            &view(CaseFocus::None, ActiveBox::None, false, RunState::Running),
         );
+        assert!(title.contains("running"), "{title}");
+        let (_, title) = draw(
+            &mut tc,
+            &view(CaseFocus::None, ActiveBox::None, false, RunState::Queued),
+        );
+        assert!(title.contains("queued"), "{title}");
+        let (_, title) = draw(
+            &mut tc,
+            &view(CaseFocus::None, ActiveBox::None, false, RunState::Idle),
+        );
+        assert!(
+            !title.contains("running") && !title.contains("queued"),
+            "{title}"
+        );
+    }
+
+    #[test]
+    fn editing_marks_the_active_pane() {
+        let mut tc = TestCase::new("1", "2");
+        tc.set_result(CaseVerdict::WA { ms: 1 }, "0".into());
+        tc.collapsed = false;
+        let (buffer, _) = draw(
+            &mut tc,
+            &view(CaseFocus::Edit, ActiveBox::Input, false, RunState::Idle),
+        );
+        // Labels are centred in the gutter under `01 ▾`: "in" at 3..5.
+        let input = tc.input_box.rect;
+        assert_eq!(buffer[(3, input.y)].symbol(), "i");
+        let label_end = 4;
         assert_eq!(
-            buffer[(2, 0)].fg,
-            theme::MUTED(),
-            "the CASE kicker stays quiet"
+            buffer[(label_end, input.y)].fg,
+            theme::accent(),
+            "the active pane's label is the accent"
+        );
+        let expected = tc.expected_box.rect;
+        assert_eq!(buffer[(label_end, expected.y)].fg, theme::faint());
+    }
+
+    #[test]
+    fn panes_are_labelled_and_divided() {
+        let mut tc = TestCase::new("5", "10");
+        tc.set_result(CaseVerdict::WA { ms: 9 }, "0".into());
+        tc.collapsed = false;
+        let (buffer, _) = draw(
+            &mut tc,
+            &view(CaseFocus::None, ActiveBox::None, false, RunState::Idle),
+        );
+        let screen: Vec<String> = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
+            })
+            .collect();
+        let text = screen.join("\n");
+        for word in [" in  5", "exp  10"] {
+            assert!(text.contains(word), "{word} missing:\n{text}");
+        }
+        // Got has no label: its tinted panel sets it apart.
+        assert!(!text.contains("got"), "{text}");
+        let got = tc.got_box.rect;
+        assert_eq!(buffer[(got.x, got.y)].bg, theme::panel());
+        let [_, _, got_text] = tc.text_regions();
+        assert_eq!(buffer[(got_text.x, got_text.y)].symbol(), "0");
+        assert_eq!(
+            tc.text_regions()[0].x,
+            CONTENT_INDENT,
+            "text starts under the verdict"
         );
     }
 
@@ -1569,7 +1636,7 @@ mod tests {
     fn red_spans(line: &Line<'static>) -> Vec<String> {
         line.spans
             .iter()
-            .filter(|span| span.style.fg == Some(theme::RED()))
+            .filter(|span| span.style.fg == Some(theme::error()))
             .map(|span| span.content.to_string())
             .collect()
     }
@@ -1587,16 +1654,14 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(contents(&got[0]), vec!["3 ", "9", " ", "7"]);
         assert_eq!(red_spans(&got[0]), vec!["9", "7"]);
-        assert!(
-            got[0].spans.iter().all(|span| span.style.bg.is_none()),
-            "the diff only colors text, never background blocks"
-        );
-        assert!(
-            got[0]
-                .spans
-                .iter()
-                .all(|span| span.style.bg != Some(theme::GREEN()))
-        );
+        for span in &got[0].spans {
+            let differs = span.style.fg == Some(theme::error());
+            assert_eq!(
+                span.style.bg,
+                differs.then(theme::diff),
+                "only differing characters get the dark red wash: {span:?}"
+            );
+        }
     }
 
     #[test]
@@ -1760,9 +1825,9 @@ mod tests {
             rows < 20,
             "huge output must not inflate the pane: {rows} rows"
         );
-        assert_eq!(tc.row_height(), 1 + 3 + 1 + rows + 2 + 1);
+        assert_eq!(tc.row_height(), CARD_CHROME_ROWS + 1 + rows);
         assert!(
-            tc.got_view()
+            tc.got_view(RunState::Idle)
                 .last()
                 .unwrap()
                 .to_string()
@@ -1771,16 +1836,9 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
         let area = Rect::new(0, 0, 80, tc.row_height() as u16);
+        let look = view(CaseFocus::None, ActiveBox::None, false, RunState::Idle);
         terminal
-            .draw(|frame| {
-                tc.draw_tc(
-                    frame.buffer_mut(),
-                    area,
-                    1,
-                    ActiveBox::None,
-                    CaseFocus::None,
-                )
-            })
+            .draw(|frame| tc.draw_tc(frame.buffer_mut(), area, &look))
             .unwrap();
 
         let screen = screen_of(&terminal);
@@ -1804,7 +1862,7 @@ mod tests {
             "huge WA output must bypass the diff path"
         );
 
-        let view = tc.got_view();
+        let view = tc.got_view(RunState::Idle);
         assert!(view.len() <= DIFF_MAX_LINES + 2);
         assert!(view.iter().all(|line| red_spans(line).is_empty()));
         assert!(
@@ -1817,7 +1875,7 @@ mod tests {
         // Repeated redraws walk only the retained 24 KB preview, never the
         // original 2 MB string.
         for _ in 0..20 {
-            assert_eq!(tc.got_view().len(), view.len());
+            assert_eq!(tc.got_view(RunState::Idle).len(), view.len());
         }
     }
 
@@ -1831,7 +1889,7 @@ mod tests {
 
         assert!(!tc.got_truncated(), "the retention cap was not reached");
         assert!(!tc.wa_diff_active(), "large previews must not be diffed");
-        let view = tc.got_view();
+        let view = tc.got_view(RunState::Idle);
         assert!(view.iter().all(|line| red_spans(line).is_empty()));
         assert!(view.last().unwrap().to_string().contains("diff skipped"));
     }
@@ -1852,7 +1910,7 @@ mod tests {
         assert!(!tc.output_too_large);
         assert!(tc.got_content.as_ref().unwrap().len() <= INLINE_PREVIEW_MAX_BYTES);
         assert!(
-            tc.got_view()
+            tc.got_view(RunState::Idle)
                 .last()
                 .unwrap()
                 .to_string()

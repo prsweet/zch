@@ -30,3 +30,7 @@ panic = "abort"
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+[target."cfg(unix)".dependencies]
+libc = "0.2.191"
+portable-pty = "0.9"
