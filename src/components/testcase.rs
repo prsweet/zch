@@ -771,8 +771,7 @@ impl TestCase {
         };
         let compact = row.width < 56;
         let mut left = vec![
-            Span::styled(format!("{:02} ", view.number), number_style),
-            Span::styled(format!("{chevron} "), Style::new().fg(theme::faint())),
+            Span::styled(format!(" {:02}  ", view.number), number_style),
         ];
         match (self.verdict, view.state) {
             (CaseVerdict::Pending, RunState::Running) => {
@@ -799,11 +798,12 @@ impl TestCase {
             }
         }
 
-        let right = if view.focus == CaseFocus::Delete {
-            Line::from(Span::styled(
+        let mut right = vec![];
+        if view.focus == CaseFocus::Delete {
+            right.push(Span::styled(
                 "delete?",
                 Style::new().fg(theme::error()).bold(),
-            ))
+            ));
         } else {
             let mut facts = Vec::new();
             if let Some(ms) = self.verdict.time_ms() {
@@ -814,11 +814,12 @@ impl TestCase {
             {
                 facts.push(format_memory(kb));
             }
-            Line::from(Span::styled(
+            right.push(Span::styled(
                 facts.join(" · "),
                 Style::new().fg(theme::faint()),
-            ))
+            ));
         };
+        right.push(Span::styled(format!(" {chevron}"), Style::new().fg(theme::faint())));
         ui::row_buf(
             buf,
             Rect {
@@ -827,7 +828,7 @@ impl TestCase {
                 ..row
             },
             Line::from(left),
-            right,
+            Line::from(right),
         );
     }
 

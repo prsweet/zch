@@ -206,8 +206,8 @@ pub mod icons {
     pub const TEXT: &str = "\u{f15c}";
     /// Test data: `.in`, `.out`, `.ans`.
     pub const DATA: &str = "\u{f0ce}";
-    pub const EXPANDED: &str = "▾";
-    pub const COLLAPSED: &str = "▸";
+    pub const EXPANDED: &str = "-";
+    pub const COLLAPSED: &str = "+";
     pub const PROMPT: &str = "❯";
     /// The focus rail at the left edge of the selected case or pane.
     pub const RAIL: &str = "▎";
