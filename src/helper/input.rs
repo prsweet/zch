@@ -16,6 +16,12 @@ impl Helper {
         {
             return None;
         }
+        if let Event::Mouse(mouse) = &event
+            && self.pane_dialog.is_none()
+            && self.open_on_double_click(mouse)
+        {
+            return None;
+        }
         // Help sits on top of everything (the message log included) and
         // closes back to whatever was open under it.
         if let Event::Key(key) = &event {
@@ -30,16 +36,17 @@ impl Helper {
                 return None;
             }
         }
+        // The viewer opens over any sheet, the message log included.
+        if self.pane_dialog.is_some() {
+            self.handle_pane_dialog_event(event);
+            return None;
+        }
         if self.show_log {
             if let Event::Key(key) = &event
                 && matches!(key.code, KeyCode::Char('m' | 'q') | KeyCode::Esc)
             {
                 self.show_log = false;
             }
-            return None;
-        }
-        if self.pane_dialog.is_some() {
-            self.handle_pane_dialog_event(event);
             return None;
         }
         match event {
@@ -235,33 +242,16 @@ impl Helper {
                     self.submissions_scrollbar_drag = None;
                 }
 
-                if matches!(self.input_mode, InputMode::Normal | InputMode::Editing)
+                if self.input_mode == InputMode::Normal
                     && let MouseEventKind::Down(MouseButton::Left) = mouse.kind
+                    && self.tc_list.testcases.iter().any(|tc| {
+                        tc.area
+                            .rect
+                            .contains(Position::new(mouse.column, mouse.row))
+                    })
                 {
-                    let hit = self.tc_list.pane_at(mouse.column, mouse.row);
-                    let double = hit.is_some_and(|(index, pane)| {
-                        self.last_pane_click
-                            .is_some_and(|(at, last_index, last_pane)| {
-                                last_index == index
-                                    && last_pane == pane
-                                    && at.elapsed() < Duration::from_millis(450)
-                            })
-                    });
-                    self.last_pane_click = hit.map(|(index, pane)| (Instant::now(), index, pane));
-                    if double && let Some((index, pane)) = hit {
-                        self.open_pane_dialog(index, pane);
-                        return None;
-                    }
-                    if self.input_mode == InputMode::Normal
-                        && self.tc_list.testcases.iter().any(|tc| {
-                            tc.area
-                                .rect
-                                .contains(Position::new(mouse.column, mouse.row))
-                        })
-                    {
-                        // A click picks the case, like j/k would.
-                        self.selection_visible = true;
-                    }
+                    // A click picks the case, like j/k would.
+                    self.selection_visible = true;
                 }
 
                 let over_submissions = self

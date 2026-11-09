@@ -372,8 +372,8 @@ fn a_drag_selects_inside_one_pane_and_copies_on_release() {
     // While held, the cells get a light wash; the input pane does not.
     terminal.draw(|f| helper.draw(f)).unwrap();
     let buffer = terminal.backend().buffer();
-    // The got pane sits on its tinted panel; the wash lightens that.
-    let washed = theme::blend(theme::panel_rgb(), theme::p().text, 0.3);
+    // The got pane is a tinted well; the wash lightens that.
+    let washed = theme::blend(theme::got_rgb(), theme::p().text, 0.3);
     assert_eq!(buffer[(got.x, got.y)].bg, washed);
     assert_ne!(buffer[(input.x, input.y)].bg, washed);
 
@@ -782,8 +782,9 @@ fn test_case_list_reserves_a_scroll_viewport() {
     terminal.draw(|f| helper.draw(f)).unwrap();
 
     assert_eq!(
-        helper.tc_list.testcases[0].area.rect.x, 0,
-        "the list starts at the edge so the focus rail sits in the gutter"
+        helper.tc_list.testcases[0].area.rect.x,
+        crate::components::ui::GUTTER,
+        "cases keep the screen's gutter on both sides"
     );
     assert_eq!(
         helper.tc_list.testcases[0].area.rect.y, 7,
@@ -813,8 +814,9 @@ fn submissions_panel_scrolls_internally() {
     terminal.draw(|f| helper.draw(f)).unwrap();
     let area = helper.submissions_area;
     assert_eq!(
-        area.height as usize, SUBMISSION_VIEWPORT,
-        "one row per submission, at most a few"
+        area.height as usize,
+        SUBMISSION_VIEWPORT + 1,
+        "a title row, then at most a few submissions"
     );
     let wheel = |kind| {
         Event::Mouse(MouseEvent {
@@ -1359,7 +1361,7 @@ fn clicking_a_pane_in_edit_mode_moves_the_focus() {
 }
 
 #[test]
-fn double_click_opens_a_bigger_pane_dialog() {
+fn double_click_opens_a_cut_pane_only() {
     let root = temp_root("pane_dialog");
     let fs_ops = FsOps::with_root(root.clone());
     let work = root.join("problems");
@@ -1368,6 +1370,22 @@ fn double_click_opens_a_bigger_pane_dialog() {
     let mut helper = Helper::new(work, &fs_ops);
     helper.new_problem(sample_problem());
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|f| helper.draw(f)).unwrap();
+
+    // Everything in this box is already on screen: nothing to open.
+    let rect = helper.tc_list.testcases[0].input_box.rect;
+    let fits = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: rect.x + 2,
+        row: rect.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    helper.handle_event(fits.clone());
+    helper.handle_event(fits);
+    assert!(helper.pane_dialog.is_none(), "text that fits opens nothing");
+
+    let wide = format!("1 2 {}", "9 ".repeat(80));
+    helper.tc_list.testcases[0] = TestCase::new(&wide, "3");
     terminal.draw(|f| helper.draw(f)).unwrap();
 
     let rect = helper.tc_list.testcases[0].input_box.rect;
@@ -1395,7 +1413,7 @@ fn double_click_opens_a_bigger_pane_dialog() {
         dialog
             .visible_lines()
             .iter()
-            .any(|line| line.to_string() == "1 2")
+            .any(|line| line.to_string() == wide)
     );
 
     terminal.draw(|f| helper.draw(f)).unwrap();
@@ -1695,7 +1713,8 @@ fn safe_wa_output_keeps_its_diff_in_the_dialog() {
 
     let mut helper = Helper::new(work, &fs_ops);
     helper.new_problem(sample_problem());
-    helper.tc_list.testcases[0].set_result(CaseVerdict::WA { ms: 1 }, "4".into());
+    // Wider than the box, so it is cut and opens.
+    helper.tc_list.testcases[0].set_result(CaseVerdict::WA { ms: 1 }, "4 ".repeat(60));
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal.draw(|f| helper.draw(f)).unwrap();
 
@@ -2052,7 +2071,7 @@ fn screens_render_at_the_floor_and_wide() {
     std::fs::create_dir_all(work.join("round912")).unwrap();
     std::fs::write(work.join("A.cpp"), "").unwrap();
 
-    let sizes = [(48u16, 23u16), (100, 30)];
+    let sizes = [(48u16, 24u16), (100, 30)];
     let check = |helper: &mut Helper, label: &str| {
         for (width, height) in sizes {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -2069,7 +2088,7 @@ fn screens_render_at_the_floor_and_wide() {
             }
             let console = row_text(&terminal, height - 1);
             assert!(
-                console.contains("[⌥H] help") || console.contains("[Esc] close"),
+                console.contains("[Ctrl-H] help") || console.contains("[Esc] close"),
                 "{label} {width}x{height}: help (or the way out of it) in the console: {console}"
             );
         }
@@ -2126,7 +2145,7 @@ fn option_h_opens_help_for_the_mode_you_are_in() {
     helper.handle_event(key(KeyCode::Char('h')));
     assert!(!helper.show_help);
 
-    // While editing, `h` is a letter and ⌥H is still help.
+    // While editing, `h` is a letter and Ctrl-H is still help.
     helper.handle_event(key(KeyCode::Char('e')));
     helper.handle_event(key(KeyCode::Char('h')));
     assert!(!helper.show_help, "h types an h while editing");
@@ -2163,6 +2182,46 @@ fn option_h_opens_help_for_the_mode_you_are_in() {
     helper.handle_event(key(KeyCode::Esc));
     helper.handle_event(key(KeyCode::Char('˙')));
     assert!(helper.show_help);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_cut_error_opens_whole_on_a_double_click() {
+    let root = temp_root("reveal_error");
+    let fs_ops = FsOps::with_root(root.clone());
+    let work = root.join("problems");
+    std::fs::create_dir_all(&work).unwrap();
+
+    let mut helper = Helper::new(work, &fs_ops);
+    let long = format!("could not save: {}", "the disk said no ".repeat(10));
+    helper.config_menu.error = Some(long.clone());
+    helper.input_mode = InputMode::Config;
+    let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+    terminal.draw(|f| helper.draw(f)).unwrap();
+
+    let screen = terminal.backend().buffer().clone();
+    let (x, y) = (0..screen.area.height)
+        .flat_map(|y| (0..screen.area.width).map(move |x| (x, y)))
+        .find(|&(x, y)| screen[(x, y)].symbol() == "✗")
+        .expect("the error is drawn");
+    let click = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: x + 4,
+        row: y,
+        modifiers: KeyModifiers::NONE,
+    });
+    helper.handle_event(click.clone());
+    assert!(helper.pane_dialog.is_none(), "one click opens nothing");
+    helper.handle_event(click);
+    let dialog = helper.pane_dialog.as_ref().expect("double click opens it");
+    assert_eq!(dialog.title, "Error");
+    assert_eq!(dialog.visible_lines()[0].to_string(), long);
+
+    // The viewer closes back to the config sheet.
+    helper.handle_event(key(KeyCode::Esc));
+    assert!(helper.pane_dialog.is_none());
+    assert_eq!(helper.input_mode, InputMode::Config);
 
     let _ = std::fs::remove_dir_all(&root);
 }

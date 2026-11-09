@@ -10,9 +10,9 @@ use ratatui::{
     buffer::Buffer,
     crossterm::event::{MouseButton, MouseEvent, MouseEventKind},
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Paragraph, Widget},
+    widgets::{Block, Borders, Paragraph, Widget},
 };
 use ratatui_textarea::TextArea;
 
@@ -322,6 +322,9 @@ pub struct TestCase {
     pub collapsed: bool,
     input_cap: Option<usize>,
     output_cap: Option<usize>,
+    /// Which boxes (input, expected, got) could not show all of their
+    /// content last frame: only those open whole on a double-click.
+    clipped: [bool; 3],
 }
 
 impl TestCase {
@@ -352,6 +355,7 @@ impl TestCase {
             collapsed: false,
             input_cap: None,
             output_cap: None,
+            clipped: [false; 3],
         }
     }
 
@@ -512,6 +516,16 @@ impl TestCase {
             .is_some_and(|at| motion::active(at, motion::REVEAL, now))
     }
 
+    /// Whether `pane` was drawn cut last frame.
+    pub fn pane_clipped(&self, pane: PaneKind) -> bool {
+        let index = match pane {
+            PaneKind::Input => 0,
+            PaneKind::Expected => 1,
+            PaneKind::Got => 2,
+        };
+        self.clipped[index]
+    }
+
     pub fn got_is_paged(&self) -> bool {
         self.got_file.is_some()
     }
@@ -644,6 +658,7 @@ impl TestCase {
     /// The rail marks focus only (selected, editing, delete target); the
     /// verdict is a word in its colour, which colours in as it arrives.
     pub fn draw_tc(&mut self, buf: &mut Buffer, area: Rect, view: &CaseView) {
+        self.clipped = [false; 3];
         self.area.rect = area;
         self.collapse_toggle_area.rect = Rect { height: 1, ..area };
         self.input_box.rect = Rect::default();
@@ -653,6 +668,13 @@ impl TestCase {
             return;
         }
 
+        // The card is every row but the trailing gap that keeps cases
+        // apart. It sits on the canvas: only the got box is filled.
+        let card = Rect {
+            height: area.height.saturating_sub(1).max(1),
+            ..area
+        };
+
         let rail = match view.focus {
             CaseFocus::Edit => Some(theme::accent()),
             CaseFocus::Delete => Some(theme::error()),
@@ -660,8 +682,8 @@ impl TestCase {
             CaseFocus::None => None,
         };
         if let Some(rail) = rail {
-            let height = if self.collapsed { 1 } else { area.height };
-            for y in area.y..area.y + height.min(area.height) {
+            // Exactly as tall as the card: never into the gap below it.
+            for y in card.top()..card.bottom() {
                 buf[(area.x, y)]
                     .set_symbol(icons::RAIL)
                     .set_style(Style::new().fg(rail));
@@ -673,53 +695,76 @@ impl TestCase {
             return;
         }
 
-        let content_x = area.x + CONTENT_INDENT;
-        let content_width = area.width.saturating_sub(CONTENT_INDENT + 1);
         let input_rows = self.input_lines() as u16;
         let output_rows = self.output_rows() as u16;
-        let input_y = area.y + 1;
-        let output_y = input_y + input_rows;
+        let box_x = area.x + CONTENT_INDENT;
+        let box_width = area.width.saturating_sub(CONTENT_INDENT + CARD_PAD_RIGHT);
+        let half = box_width.saturating_sub(BOX_GAP) / 2;
 
-        // Expected and got share the row band. Got sits on a tinted panel
-        // with a cell of padding inside, so the two read apart without a
-        // label or a rule between them.
-        let left_width = content_width.saturating_sub(GOT_GAP) / 2;
-        let got_panel_x = content_x + left_width + GOT_GAP;
-
-        // Hit areas take the label too, so a click on "in" focuses input.
+        // Each pane is open at the top and right: a left edge and a floor
+        // frame it.
+        // Its label sits in the gutter beside its first line. Expected and
+        // got share a row of boxes.
+        let frame_rows = BOX_PAD_Y * 2 + 1;
         self.input_box.rect = Rect {
-            x: area.x + 1,
-            y: input_y,
-            width: area.width.saturating_sub(2),
-            height: input_rows,
+            x: box_x,
+            y: area.y + 1 + HEADER_GAP,
+            width: box_width,
+            height: input_rows + frame_rows,
         };
+        let output_y = self.input_box.rect.bottom();
         self.expected_box.rect = Rect {
-            x: area.x + 1,
+            x: box_x,
             y: output_y,
-            width: got_panel_x.saturating_sub(area.x + 1),
-            height: output_rows,
+            width: half,
+            height: output_rows + frame_rows,
         };
         self.got_box.rect = Rect {
-            x: got_panel_x,
+            x: box_x + half + BOX_GAP,
             y: output_y,
-            width: area.right().saturating_sub(got_panel_x + 1),
-            height: output_rows,
+            width: box_width.saturating_sub(half + BOX_GAP),
+            height: output_rows + frame_rows,
         };
+        // Boxes may run past a partially scrolled card; draw what fits.
+        let input_box = self.input_box.rect.intersection(area);
+        let expected_box = self.expected_box.rect.intersection(area);
+        let got_box = self.got_box.rect.intersection(area);
 
         let editing = view.focus == CaseFocus::Edit;
         let input_active = editing && view.active_box == ActiveBox::Input;
         let expected_active = editing && view.active_box == ActiveBox::Expected;
-        gutter_label(buf, area.x, input_y, "inp", input_active);
-        gutter_label(buf, area.x, output_y, "exp", expected_active);
+        pane_box(buf, input_box, frame_for(input_active), None);
+        pane_box(buf, expected_box, frame_for(expected_active), None);
+        // Got is the one filled box, framed in its verdict's colour.
+        let got_frame = match self.verdict {
+            CaseVerdict::Pending => frame_for(false),
+            verdict => theme::paint(verdict.rgb()),
+        };
+        pane_box(buf, got_box, got_frame, Some(theme::got()));
+        gutter_label(buf, area.x, input_box.y + BOX_PAD_Y, "inp", input_active);
+        gutter_label(
+            buf,
+            area.x,
+            expected_box.y + BOX_PAD_Y,
+            "exp",
+            expected_active,
+        );
+
+        let [input_text, expected_text, got_text] = self.text_regions();
+        // A box being typed into scrolls instead; the rest are cut when their
+        // lines run past the box, or the content was capped before drawing.
+        let (input_lines, input_capped) = pane_lines_cut(&self.input_text());
+        let (expected_lines, expected_capped) = pane_lines_cut(&self.expected_text());
+        let (got_view, got_capped) = self.got_view_cut(view.state);
+        self.clipped = [
+            !input_active && (input_capped || overflows(&input_lines, input_text)),
+            !expected_active && (expected_capped || overflows(&expected_lines, expected_text)),
+            got_capped || self.got_is_paged() || overflows(&got_view, got_text),
+        ];
         Self::render_pane(
             buf,
             &mut self.inp_content,
-            Rect {
-                x: content_x,
-                y: input_y,
-                width: content_width,
-                height: input_rows,
-            },
+            input_text.intersection(area),
             input_active,
             editing,
             "type the input",
@@ -727,27 +772,14 @@ impl TestCase {
         Self::render_pane(
             buf,
             &mut self.exp_content,
-            Rect {
-                x: content_x,
-                y: output_y,
-                width: left_width,
-                height: output_rows,
-            },
+            expected_text.intersection(area),
             expected_active,
             editing,
             "type the expected output",
         );
-
-        let panel = self.got_box.rect.intersection(area);
-        if panel.width > GOT_PAD * 2 {
-            ui::fill_buf(buf, panel, theme::panel());
-            let got = Rect {
-                x: panel.x + GOT_PAD,
-                width: panel.width - GOT_PAD * 2,
-                ..panel
-            };
-            let got_lines: Vec<Line<'static>> = self
-                .got_view(view.state)
+        let got = got_text.intersection(area);
+        if got.width > 0 {
+            let got_lines: Vec<Line<'static>> = got_view
                 .into_iter()
                 .map(|line| clip_line(line, got.width as usize))
                 .collect();
@@ -770,26 +802,31 @@ impl TestCase {
             icons::EXPANDED
         };
         let compact = row.width < 56;
-        let mut left = vec![
-            Span::styled(format!(" {:02}  ", view.number), number_style),
-        ];
+        // The number is right-aligned to the label column (`01`, `in`, `exp`
+        // end on the same cell) and the verdict starts where the boxes do.
+        let number = format!("{:02}", view.number);
+        let left = Span::styled(
+            format!("{number:>width$}", width = LABEL_COLUMN as usize),
+            number_style,
+        );
+        let mut verdict_spans = vec![];
         match (self.verdict, view.state) {
             (CaseVerdict::Pending, RunState::Running) => {
-                left.push(Span::styled(
+                verdict_spans.push(Span::styled(
                     format!("{} ", motion::spinner(view.epoch, view.now)),
                     Style::new().fg(theme::accent()),
                 ));
-                left.push(Span::styled("running", Style::new().fg(theme::muted())));
+                verdict_spans.push(Span::styled("running", Style::new().fg(theme::muted())));
             }
             (CaseVerdict::Pending, RunState::Queued) => {
-                left.push(Span::styled("queued", Style::new().fg(theme::faint())));
+                verdict_spans.push(Span::styled("queued", Style::new().fg(theme::faint())));
             }
             (CaseVerdict::Pending, RunState::Idle) => {}
             (verdict, _) => {
                 let reveal = self
                     .revealed_at
                     .map_or(1.0, |at| motion::ease_out(at, motion::REVEAL, view.now));
-                left.push(Span::styled(
+                verdict_spans.push(Span::styled(
                     verdict.label(compact),
                     Style::new()
                         .fg(theme::blend(theme::p().muted, verdict.rgb(), reveal))
@@ -819,17 +856,33 @@ impl TestCase {
                 Style::new().fg(theme::faint()),
             ));
         };
-        right.push(Span::styled(format!(" {chevron}"), Style::new().fg(theme::faint())));
-        ui::row_buf(
-            buf,
-            Rect {
-                x: row.x + 2,
-                width: row.width.saturating_sub(3),
-                ..row
-            },
-            Line::from(left),
-            Line::from(right),
-        );
+        right.push(Span::styled(
+            format!(" {chevron}"),
+            Style::new().fg(theme::faint()),
+        ));
+        let right = Line::from(right);
+        let right_width = right.width() as u16;
+        let region = Rect {
+            x: row.x + LABEL_START,
+            // Ends where the boxes do.
+            width: row.width.saturating_sub(LABEL_START + CARD_PAD_RIGHT),
+            ..row
+        };
+        ui::row_buf(buf, region, Line::from(left), right);
+
+        // The verdict sits in the middle of the row, clear of the number
+        // and the facts; on a row too tight for that, it truncates.
+        let verdict = Line::from(verdict_spans);
+        let width = verdict.width() as u16;
+        let start = region.x + LABEL_COLUMN + COLUMN_GAP;
+        let end = region.right().saturating_sub(right_width + 1);
+        if width == 0 || end <= start {
+            return;
+        }
+        let x = (region.x + region.width.saturating_sub(width) / 2)
+            .max(start)
+            .min(end.saturating_sub(width).max(start));
+        buf.set_line(x, row.y, &verdict, end - x);
     }
 
     /// Whether this verdict's output explains a failure (RE, CE, TLE, OLE).
@@ -880,23 +933,34 @@ impl TestCase {
     /// preview on every redraw is not worth it, and the user still sees the
     /// first screenful plus a clear truncation note.
     fn got_view(&self, state: RunState) -> Vec<Line<'static>> {
+        self.got_view_cut(state).0
+    }
+
+    /// [`Self::got_view`], and whether the output was capped to fit it.
+    fn got_view_cut(&self, state: RunState) -> (Vec<Line<'static>>, bool) {
         let Some(got) = &self.got_content else {
             let hint = match state {
                 RunState::Running => "running…",
                 RunState::Queued => "waiting for its turn",
                 RunState::Idle => "not run yet",
             };
-            return vec![Line::from(Span::styled(
-                hint,
-                Style::new().fg(theme::faint()),
-            ))];
+            return (
+                vec![Line::from(Span::styled(
+                    hint,
+                    Style::new().fg(theme::faint()),
+                ))],
+                false,
+            );
         };
 
         if got.is_empty() {
-            return vec![Line::from(Span::styled(
-                "no output",
-                Style::new().fg(theme::faint()),
-            ))];
+            return (
+                vec![Line::from(Span::styled(
+                    "no output",
+                    Style::new().fg(theme::faint()),
+                ))],
+                false,
+            );
         }
 
         let (stdout, stderr) = split_stderr(got);
@@ -939,6 +1003,10 @@ impl TestCase {
 
         let skipped_diff =
             matches!(self.verdict, CaseVerdict::WA { .. }) && !diffed && !stdout.text.is_empty();
+        let capped = self.got_truncated
+            || std::iter::once(&stdout)
+                .chain(stderr.as_ref())
+                .any(|capped| capped.hidden_lines() > 0 || capped.chars_cut);
         if self.got_truncated {
             lines.push(muted(OUTPUT_TRUNCATED_NOTE.to_string()));
         } else if skipped_diff {
@@ -952,7 +1020,7 @@ impl TestCase {
                 lines.push(note);
             }
         }
-        lines
+        (lines, capped)
     }
 
     fn render_pane(
@@ -997,23 +1065,22 @@ impl TestCase {
     /// Where each pane's text was drawn last frame (input, expected, got),
     /// without the labels: what a mouse selection in that pane may cover.
     pub fn text_regions(&self) -> [Rect; 3] {
-        let label = CONTENT_INDENT - 1;
-        let shift = |rect: Rect, by: u16, trim: u16| {
-            if rect.width <= by + trim {
+        // Right of the left edge, above the floor, inside the padding.
+        let inner = |rect: Rect| {
+            if rect.width <= 1 + BOX_PAD_X * 2 || rect.height <= 1 + BOX_PAD_Y * 2 {
                 return Rect::default();
             }
             Rect {
-                x: rect.x + by,
-                width: rect.width - by - trim,
-                ..rect
+                x: rect.x + 1 + BOX_PAD_X,
+                y: rect.y + BOX_PAD_Y,
+                width: rect.width - 1 - BOX_PAD_X * 2,
+                height: rect.height - 1 - BOX_PAD_Y * 2,
             }
         };
         [
-            shift(self.input_box.rect, label, 0),
-            // The gap before the got panel closes the expected pane.
-            shift(self.expected_box.rect, label, GOT_GAP),
-            // Inside the got panel's padding.
-            shift(self.got_box.rect, GOT_PAD, GOT_PAD),
+            inner(self.input_box.rect),
+            inner(self.expected_box.rect),
+            inner(self.got_box.rect),
         ]
     }
 
@@ -1056,26 +1123,67 @@ const LARGE_OUTPUT_WARNING: &str = "Output is too large to show fully. Showing a
 pub(crate) const PAGED_OUTPUT_NOTE: &str = "Large output · paged view · diff is computed per page";
 /// A WA diff is only useful on a screenful. Larger previews are shown plain.
 const WA_DIFF_MAX_CHARS: usize = 8_000;
-/// A collapsed case is a single row, so a run of accepted cases reads as a
-/// compact table.
-const COLLAPSED_HEIGHT: usize = 1;
-/// Space between the expected text and the got panel.
-const GOT_GAP: u16 = 2;
-/// Padding inside the got panel, left and right.
-const GOT_PAD: u16 = 1;
+/// A collapsed case is its header on the card background and the gap row
+/// that keeps it apart from the next case.
+const COLLAPSED_HEIGHT: usize = 2;
+/// Space between the expected and got boxes.
+const BOX_GAP: u16 = 1;
+/// Padding inside each box, left and right of the text: twice the rows,
+/// since a cell is about twice as tall as it is wide.
+const BOX_PAD_X: u16 = 2;
+/// Padding inside each box, above and below the text.
+const BOX_PAD_Y: u16 = 1;
+/// Blank rows between a case's header and its first box.
+const HEADER_GAP: u16 = 1;
 
-/// A pane label in the gutter under the case number (`01 ▾`), centred in
-/// it. The pane being edited gets the accent.
+/// The glyphs of a pane's left edge and floor.
+const FRAME: ratatui::widgets::BorderType = ratatui::widgets::BorderType::QuadrantInside;
+
+/// A pane's frame colour: the accent while it is being edited.
+fn frame_for(active: bool) -> Color {
+    if active {
+        theme::accent()
+    } else {
+        theme::border()
+    }
+}
+
+/// A pane: a left edge and a floor in `frame`, and inside them `fill`, if
+/// any, which square corners let sit flush in the box.
+fn pane_box(buf: &mut Buffer, rect: Rect, frame: Color, fill: Option<Color>) {
+    if rect.width < 2 || rect.height < 2 {
+        return;
+    }
+    Block::new()
+        .borders(Borders::LEFT | Borders::BOTTOM)
+        .border_style(Style::new().fg(frame))
+        .border_type(FRAME)
+        .render(rect, buf);
+    if let Some(fill) = fill {
+        ui::fill_buf(
+            buf,
+            Rect {
+                x: rect.x + 1,
+                width: rect.width - 1,
+                height: rect.height - 1,
+                ..rect
+            },
+            fill,
+        );
+    }
+}
+
+/// A pane label in the first column, right-aligned under the case number.
+/// The pane being edited gets the accent.
 fn gutter_label(buf: &mut Buffer, card_x: u16, y: u16, label: &str, active: bool) {
     let style = if active {
         Style::new().fg(theme::accent()).bold()
     } else {
         Style::new().fg(theme::faint())
     };
-    let width = label.chars().count() as u16;
-    // The gutter runs from after the rail to the cell before the content.
-    let gutter = CONTENT_INDENT - 2;
-    let x = card_x + 1 + gutter.saturating_sub(width).div_ceil(2);
+    let width = label.chars().count().min(LABEL_COLUMN as usize) as u16;
+    // Right-aligned to the label column, like the case number above it.
+    let x = card_x + LABEL_START + LABEL_COLUMN - width;
     Paragraph::new(Span::styled(label.to_string(), style)).render(
         Rect {
             x,
@@ -1086,10 +1194,28 @@ fn gutter_label(buf: &mut Buffer, card_x: u16, y: u16, label: &str, active: bool
         buf,
     );
 }
-/// The header and the gap after the card; labels live in the gutter.
-const CARD_CHROME_ROWS: usize = 2;
-/// Content starts under the verdict word: rail, gap, `02 `, `▾ `.
-const CONTENT_INDENT: u16 = 7;
+/// The header and the gap under it, the floor and padding of the input box
+/// and of the expected/got boxes, and the gap after the card.
+const CARD_CHROME_ROWS: usize = 1 + HEADER_GAP as usize + 2 * (1 + 2 * BOX_PAD_Y as usize) + 1;
+/// The card is two columns: labels (`01`, `inp`, `exp`) right-aligned in
+/// the first, the verdict and the boxes left-aligned in the second, with
+/// the same gap between them on every row:
+///
+/// ```text
+/// ▎  01  wrong answer                 4 ms -
+/// ▎ inp  ║ 5
+/// ▎      ╚═════════════════════════════════
+/// ```
+///
+/// The rail, then a cell, then the label column.
+const LABEL_START: u16 = 2;
+/// Wide enough for `exp` and a three-digit case number.
+const LABEL_COLUMN: u16 = 3;
+const COLUMN_GAP: u16 = 2;
+/// Where the second column (the verdict, the boxes) starts.
+const CONTENT_INDENT: u16 = LABEL_START + LABEL_COLUMN + COLUMN_GAP;
+/// Room right of the boxes, matching the room left of the labels.
+const CARD_PAD_RIGHT: u16 = LABEL_START;
 pub(crate) const OUTPUT_TRUNCATED_NOTE: &str = "… output truncated";
 const DIFF_SKIPPED_NOTE: &str = "… diff skipped for large output";
 
@@ -1232,7 +1358,13 @@ fn truncation_note(caps: &[Capped]) -> Option<Line<'static>> {
 /// Lines an Input/Expected pane shows for `text`, capped with a note when the
 /// content would not fit — mirroring what `got_view` does for Got.
 fn pane_lines(text: &str) -> Vec<Line<'static>> {
+    pane_lines_cut(text).0
+}
+
+/// [`pane_lines`], and whether the text was capped to fit them.
+fn pane_lines_cut(text: &str) -> (Vec<Line<'static>>, bool) {
     let capped = Capped::preserving_trailing(text);
+    let cut = capped.hidden_lines() > 0 || capped.chars_cut;
     let mut lines: Vec<Line<'static>> = capped
         .text
         .split('\n')
@@ -1241,7 +1373,15 @@ fn pane_lines(text: &str) -> Vec<Line<'static>> {
     if let Some(note) = truncation_note(std::slice::from_ref(&capped)) {
         lines.push(note);
     }
-    lines
+    (lines, cut)
+}
+
+/// Whether `lines` run past `region`, down or across.
+fn overflows(lines: &[Line<'static>], region: Rect) -> bool {
+    lines.len() > region.height as usize
+        || lines
+            .iter()
+            .any(|line| line.width() > region.width as usize)
 }
 
 /// Cuts a rendered line to `max_width` columns, ending with a muted `…` when
@@ -1397,19 +1537,20 @@ mod tests {
     #[test]
     fn height_tracks_content_and_collapse() {
         let mut tc = TestCase::new("1 2", "3");
-        // Header, 1 input line, 1 output line, the gap after the card.
-        assert_eq!(tc.row_height(), 4);
+        // Header and a blank row, an input line padded above and below
+        // and its floor, the same for an output line, a gap.
+        assert_eq!(tc.row_height(), 11);
 
         tc.inp_content.insert_str("\n4 5");
-        assert_eq!(tc.row_height(), 5);
+        assert_eq!(tc.row_height(), 12);
 
         tc.set_result(CaseVerdict::WA { ms: 1 }, "0\n1\n2".into());
-        assert_eq!(tc.row_height(), 7);
+        assert_eq!(tc.row_height(), 14);
 
-        // An accepted case folds to a single row.
+        // An accepted case folds to its header and the gap below it.
         tc.set_result(CaseVerdict::AC { ms: 1 }, "3".into());
         assert!(tc.collapsed);
-        assert_eq!(tc.row_height(), 1);
+        assert_eq!(tc.row_height(), 2);
     }
 
     #[test]
@@ -1492,9 +1633,14 @@ mod tests {
         assert!(title.contains("delete?"), "{title}");
         let height = tc.row_height() as u16;
         assert_eq!(
-            buffer[(0, height - 1)].symbol(),
+            buffer[(0, height - 2)].symbol(),
             icons::RAIL,
             "an expanded card's rail runs its full height"
+        );
+        assert_eq!(
+            buffer[(0, height - 1)].symbol(),
+            " ",
+            "but not into the gap below it"
         );
     }
 
@@ -1506,7 +1652,7 @@ mod tests {
             (CaseVerdict::Tle, "time limit", theme::p().warning),
             (CaseVerdict::RE, "runtime error", theme::p().error),
             (CaseVerdict::Ole, "output limit", theme::p().error),
-            (CaseVerdict::CE, "compile error", theme::p().modified),
+            (CaseVerdict::CE, "compilation error", theme::p().modified),
         ] {
             let mut tc = TestCase::new("1", "2");
             tc.set_result(verdict, "0".into());
@@ -1576,17 +1722,43 @@ mod tests {
             &mut tc,
             &view(CaseFocus::Edit, ActiveBox::Input, false, RunState::Idle),
         );
-        // Labels are centred in the gutter under `01 ▾`: "in" at 3..5.
+        // Labels are right-aligned under the case number: "inp" at 2..5.
         let input = tc.input_box.rect;
-        assert_eq!(buffer[(3, input.y)].symbol(), "i");
+        let first_line = input.y + BOX_PAD_Y;
+        assert_eq!(
+            buffer[(LABEL_START, first_line)].symbol(),
+            "i",
+            "beside the first line"
+        );
         let label_end = 4;
         assert_eq!(
-            buffer[(label_end, input.y)].fg,
+            buffer[(label_end, first_line)].fg,
             theme::accent(),
             "the active pane's label is the accent"
         );
         let expected = tc.expected_box.rect;
-        assert_eq!(buffer[(label_end, expected.y)].fg, theme::faint());
+        assert_eq!(
+            buffer[(label_end, expected.y + BOX_PAD_Y)].fg,
+            theme::faint()
+        );
+        let frame = FRAME.to_border_set();
+        let floor = input.bottom() - 1;
+        assert_eq!(
+            buffer[(input.x, floor)].fg,
+            theme::accent(),
+            "the box being edited has an accent border"
+        );
+        assert_eq!(buffer[(input.x, floor)].symbol(), frame.bottom_left);
+        assert_eq!(
+            buffer[(input.right() - 1, floor)].symbol(),
+            frame.horizontal_bottom,
+            "open right"
+        );
+        assert_eq!(
+            buffer[(input.x, input.y)].symbol(),
+            frame.vertical_left,
+            "open top"
+        );
     }
 
     #[test]
@@ -1606,19 +1778,41 @@ mod tests {
             })
             .collect();
         let text = screen.join("\n");
-        for word in [" in  5", "exp  10"] {
-            assert!(text.contains(word), "{word} missing:\n{text}");
+        let edge = FRAME.to_border_set().vertical_left;
+        for word in [
+            format!("inp  {edge}  5"),
+            format!("exp  {edge}  10"),
+            " 01 ".to_string(),
+        ] {
+            assert!(text.contains(&word), "{word} missing:\n{text}");
         }
-        // Got has no label: its tinted panel sets it apart.
+        // The verdict is centred in the header row.
+        let header = &screen[0];
+        let at = header.find("wrong answer").expect("verdict") as i32;
+        let centre = (header.chars().count() as i32 - "wrong answer".len() as i32) / 2;
+        assert!((at - centre).abs() <= 2, "{header}");
+        // Got has no label: its fill and verdict-coloured frame set it apart.
         assert!(!text.contains("got"), "{text}");
-        let got = tc.got_box.rect;
-        assert_eq!(buffer[(got.x, got.y)].bg, theme::panel());
+        assert!(!text.contains('╭') && !text.contains('╰'), "{text}");
+        let (got, expected) = (tc.got_box.rect, tc.expected_box.rect);
+        assert_eq!(buffer[(got.x + 1, got.y)].bg, theme::got(), "got is tinted");
+        assert_eq!(buffer[(got.x, got.y)].fg, theme::error(), "framed as WA");
+        assert_ne!(
+            buffer[(got.x, got.y)].bg,
+            theme::got(),
+            "the frame is not filled"
+        );
+        assert_ne!(
+            buffer[(expected.x + 1, expected.y)].bg,
+            theme::got(),
+            "only got is filled"
+        );
         let [_, _, got_text] = tc.text_regions();
         assert_eq!(buffer[(got_text.x, got_text.y)].symbol(), "0");
         assert_eq!(
             tc.text_regions()[0].x,
-            CONTENT_INDENT,
-            "text starts under the verdict"
+            CONTENT_INDENT + 1 + BOX_PAD_X,
+            "text starts inside the box border and its padding"
         );
     }
 

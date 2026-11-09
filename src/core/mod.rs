@@ -214,7 +214,7 @@ pub struct UserConfig {
     /// Codeforces `programTypeId` overrides, e.g. `{"Python": "31"}`.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub cf_language_ids: HashMap<Language, String>,
-    /// The colour theme: `prsweet`, `catppuccin` or `obsidian`.
+    /// The colour theme: `prsweet`, `catppuccin`, `obsidian` or `daylight`.
     #[serde(default)]
     pub theme: crate::components::theme::ThemeName,
 }

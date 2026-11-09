@@ -291,8 +291,14 @@ const CF_RESULT_JS: &str = r#"(function() {
             var t = d.title || '';
             return t.indexOf('Just a moment') > -1 || t.indexOf('Attention Required') > -1;
         };
+        // An error page instead of Codeforces: it will not change by itself.
+        var refused = function(d) {
+            var t = ((d.title || '') + ' ' + (d.body ? d.body.textContent.slice(0, 200) : '')).toLowerCase();
+            return t.indexOf('403') > -1 && t.indexOf('forbidden') > -1;
+        };
 
         if (challenged(document)) return say('CAPTCHA');
+        if (refused(document)) return say('BLOCKED: 403');
         var url = document.location.href;
         if (url.indexOf('/submit') > -1) {
             var eSub = document.querySelector('.error.for__submittedProblemCode, .error.for__source');
@@ -309,6 +315,7 @@ const CF_RESULT_JS: &str = r#"(function() {
         var x = new XMLHttpRequest();
         x.open('GET', '__RESULTS_PATH__', false);
         x.send(null);
+        if (x.status === 403 || x.status === 429) return say('BLOCKED: ' + x.status);
         if (x.status !== 200) return say('WAIT: results page answered ' + x.status);
         var doc = new DOMParser().parseFromString(x.responseText, 'text/html');
         if (challenged(doc)) return say('CAPTCHA_FETCH');
@@ -366,6 +373,7 @@ tell application "__APP__"
     if (count of windows) is 0 then make new document with properties {URL:"about:blank"}
     tell window 1 to set submitTab to make new tab with properties {URL:"__SUBMIT_URL__#__TAG__"}
     set tabLostPolls to 0
+    set blockedPolls to 0
     set captchaAlerted to false
     repeat 120 times
         delay 2
@@ -382,9 +390,17 @@ tell application "__APP__"
                     if(document.title.indexOf('Just a moment')>-1 || document.title.indexOf('Attention Required')>-1) isC=true;
                     if(isC) return 'CAPTCHA';
                     if(document.querySelector('__READY_SELECTOR__')) return 'READY';
+                    var t=((document.title||'')+' '+(document.body?document.body.textContent.slice(0,200):'')).toLowerCase();
+                    if(document.readyState==='complete' && t.indexOf('403')>-1 && t.indexOf('forbidden')>-1) return 'BLOCKED';
                     return 'WAITING';
                 })()" in submitTab
                 if pageCheck is "READY" then exit repeat
+                if pageCheck is "BLOCKED" then
+                    set blockedPolls to blockedPolls + 1
+                    if blockedPolls is greater than 2 then return "BLOCKED: Codeforces answered 403 Forbidden; nothing was submitted"
+                else
+                    set blockedPolls to 0
+                end if
                 if pageCheck is "CAPTCHA" then
                     if captchaAlerted is false then
                         set captchaAlerted to true
@@ -439,6 +455,7 @@ tell application "__APP__"
     set subId to ""
     set resultInfo to "UNKNOWN: Timed out"
     set resCaptchaAlerted to false
+    set blockedPolls to 0
     repeat 120 times
         set foundTab to my findSubmitTab(submitTab, "__TAG__", "__CONTEST_PREFIX__", "__RESULTS_MARK__")
         if foundTab is missing value then
@@ -479,15 +496,28 @@ tell application "__APP__"
             end if
 
             if resultInfo starts with "RESULT:" or resultInfo starts with "REJECTED:" then exit repeat
+            if resultInfo starts with "BLOCKED:" then
+                set blockedPolls to blockedPolls + 1
+                if blockedPolls is greater than 4 then
+                    set resultInfo to "BLOCKED: Codeforces answered " & (text 10 thru -1 of resultInfo) & "; check the verdict on the site"
+                    exit repeat
+                end if
+            else
+                set blockedPolls to 0
+            end if
             delay 2
         end if
     end repeat
-    if resultInfo does not start with "RESULT:" and resultInfo does not start with "REJECTED:" then
-        set resultInfo to "TIMED OUT: the judge did not answer (last state: " & resultInfo & ")"
+    if resultInfo starts with "BLOCKED:" then
+        -- Leave the tab open: it is where the verdict can still be read.
+    else
+        if resultInfo does not start with "RESULT:" and resultInfo does not start with "REJECTED:" then
+            set resultInfo to "TIMED OUT: the judge did not answer (last state: " & resultInfo & ")"
+        end if
+        try
+            close submitTab
+        end try
     end if
-    try
-        close submitTab
-    end try
 end tell
 try
     tell application frontAppName to activate
@@ -576,6 +606,8 @@ fn status_for_line(line: &str) -> Option<String> {
         Some("captcha".to_string())
     } else if let Some(rest) = line.strip_prefix("RELOAD: ") {
         Some(rest.trim().to_string())
+    } else if let Some(rest) = line.strip_prefix("BLOCKED: ") {
+        Some(format!("Codeforces answered {}, retrying", rest.trim()))
     } else if line == "WAIT" {
         Some("waiting for Codeforces".to_string())
     } else if let Some(rest) = line.strip_prefix("WAIT:") {
@@ -895,6 +927,10 @@ mod tests {
         );
         assert_eq!(
             classify("TIMED OUT: the judge did not answer (last state: WAIT)"),
+            Outcome::Failed
+        );
+        assert_eq!(
+            classify("BLOCKED: Codeforces answered 403; check the verdict on the site"),
             Outcome::Failed
         );
     }

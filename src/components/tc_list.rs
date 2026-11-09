@@ -2,10 +2,7 @@ use ratatui::{
     Frame,
     buffer::Buffer,
     crossterm::event::{Event, KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind},
-    layout::{
-        Constraint::{Length, Percentage},
-        Layout, Position, Rect,
-    },
+    layout::{Margin, Position, Rect},
     style::Modifier,
     widgets::{ScrollbarOrientation, ScrollbarState},
 };
@@ -158,11 +155,17 @@ impl TestCaseList {
         let total = self.total_rows();
         let needs_scrollbar = total > self.available_height;
 
-        let (tc_list_area, scrollbar_render_area) = if needs_scrollbar && viewport.width >= 2 {
-            let division = Layout::horizontal([Percentage(100), Length(1)]).split(viewport);
-            (division[0], division[1])
+        // Cards keep a gutter on both sides; the scrollbar, when needed,
+        // takes the last column, inside the right gutter.
+        let tc_list_area = viewport.inner(Margin::new(ui::GUTTER, 0));
+        let scrollbar_render_area = if needs_scrollbar && viewport.width >= 2 {
+            Rect {
+                x: viewport.right() - 1,
+                width: 1,
+                ..viewport
+            }
         } else {
-            (viewport, Rect::default())
+            Rect::default()
         };
 
         self.scrollbar_area = scrollbar_render_area;
@@ -502,12 +505,12 @@ mod tests {
         assert_eq!(area.width, 1, "the case-list scrollbar is one cell wide");
         let buffer = terminal.backend().buffer();
         let thumb_rows = (area.y..area.y + area.height)
-            .filter(|row| buffer[(area.x, *row)].symbol() == "┃")
+            .filter(|row| buffer[(area.x, *row)].symbol() == "▐")
             .count();
         assert!(thumb_rows > 0, "the thumb is drawn");
         for row in area.y..area.y + area.height {
             assert!(
-                matches!(buffer[(area.x, row)].symbol(), "┃" | " "),
+                matches!(buffer[(area.x, row)].symbol(), "▐" | " "),
                 "the scrollbar is a thumb on an empty track"
             );
         }
@@ -536,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn list_only_reserves_a_column_when_the_scrollbar_is_needed() {
+    fn cards_keep_a_gutter_and_the_scrollbar_takes_the_last_column() {
         let mut list = TestCaseList::new();
         list.testcases.push(TestCase::new("0", ""));
 
@@ -553,7 +556,8 @@ mod tests {
             .unwrap();
         let width_without_scrollbar = list.testcases[0].area.rect.width;
         assert_eq!(list.scrollbar_area, Rect::default());
-        assert_eq!(width_without_scrollbar, 60);
+        assert_eq!(width_without_scrollbar, 60 - ui::GUTTER * 2);
+        assert_eq!(list.testcases[0].area.rect.x, ui::GUTTER);
 
         for index in 1..20 {
             list.testcases.push(TestCase::new(&format!("{index}"), ""));
@@ -570,10 +574,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(list.scrollbar_area.width, 1, "the scrollbar is thin");
+        assert_eq!(list.scrollbar_area.x, 59, "at the edge of the screen");
         assert_eq!(
-            list.testcases[0].area.rect.width,
-            width_without_scrollbar - 1,
-            "the list gives up one column only when the scrollbar appears"
+            list.testcases[0].area.rect.width, width_without_scrollbar,
+            "the scrollbar sits in the gutter, cards keep their width"
         );
     }
 }

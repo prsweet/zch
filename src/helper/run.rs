@@ -236,7 +236,7 @@ impl Helper {
         if self
             .pane_dialog
             .as_ref()
-            .is_some_and(|dialog| dialog.pane == PaneKind::Got && dialog.case_index == index)
+            .is_some_and(|dialog| dialog.source == Some((index, PaneKind::Got)))
         {
             self.pane_dialog = None;
         }

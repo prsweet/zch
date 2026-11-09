@@ -2,8 +2,9 @@
 
 use super::*;
 
-/// Opens help from anywhere: Option-H (or Ctrl-H, or F1) is never text.
-pub(in crate::helper) const HELP_KEY: &str = "⌥H";
+/// Opens help from anywhere: Ctrl-H is never text. F1 and Option-H work
+/// too, where the terminal delivers them.
+pub(in crate::helper) const HELP_KEY: &str = "Ctrl-H";
 
 /// Nerd Font powerline arrow: closes the mode segment into the console.
 const SEGMENT_END: &str = "\u{e0b0}";
@@ -44,14 +45,7 @@ impl Helper {
     /// `◆ zch  v2.1.0` on the left; the loaded problem on the right, with a
     /// dot that lights up once there is one. A new problem's name fades in.
     fn draw_app_bar(&self, frame: &mut Frame, row: Rect, now: Instant) {
-        let left = Line::from(vec![
-            Span::styled("◆ ", Style::new().fg(theme::accent()).bold()),
-            Span::styled("zch", Style::new().fg(theme::text()).bold()),
-            Span::styled(
-                format!("  v{}", env!("CARGO_PKG_VERSION")),
-                Style::new().fg(theme::faint()),
-            ),
-        ]);
+        let left = Line::from(wordmark());
         let room = (row.width as usize).saturating_sub(left.width() + 4);
         let right = match &self.active_problem {
             Some(problem) => {
@@ -66,7 +60,16 @@ impl Helper {
                         Style::new().fg(theme::blend(p.faint, p.success, arrive)),
                     ),
                     Span::styled(
-                        ui::truncate(&problem.name, room),
+                        ui::truncate_revealing(
+                            &problem.name,
+                            room,
+                            Rect {
+                                x: row.right().saturating_sub(room as u16 + 2),
+                                width: (room as u16 + 2).min(row.width),
+                                ..row
+                            },
+                            "Problem",
+                        ),
                         Style::new()
                             .fg(theme::blend(p.faint, p.text, arrive))
                             .bold(),
@@ -142,37 +145,14 @@ impl Helper {
         }
     }
 
-    /// The rule over the footer, labelled when there are submissions under
-    /// it: `── submissions · 2 judging ───────`.
+    /// The rule over the footer.
     pub(in crate::helper) fn draw_footer_rule(&self, frame: &mut Frame, row: Rect) {
         ui::hairline(frame, row, theme::border());
-        if self.submissions.is_empty() || row.width < 20 {
-            return;
-        }
-        let judging = self.submissions.iter().filter(|s| !s.done()).count();
-        let mut spans = vec![Span::styled(
-            " submissions ",
-            Style::new().fg(theme::muted()),
-        )];
-        if judging > 0 {
-            spans.push(Span::styled(
-                format!("· {judging} judging "),
-                Style::new().fg(theme::faint()),
-            ));
-        }
-        frame.render_widget(
-            Paragraph::new(Line::from(spans)),
-            Rect {
-                x: row.x + ui::GUTTER,
-                width: row.width.saturating_sub(ui::GUTTER * 2),
-                ..row
-            },
-        );
     }
 
     pub(in crate::helper) fn submissions_viewport(&self) -> usize {
-        if self.submissions_area.height > 0 {
-            self.submissions_area.height as usize
+        if self.submissions_area.height > 1 {
+            self.submissions_area.height as usize - 1
         } else {
             SUBMISSION_VIEWPORT
         }
@@ -218,12 +198,39 @@ impl Helper {
     ) {
         self.submissions_area = area;
         self.submissions_scrollbar_area = Rect::default();
-        if area.height == 0 {
+        if area.height < 2 {
             self.submissions_scrollbar_drag = None;
             return;
         }
 
+        // The title row: what this block is, and how many are still out.
         let total = self.submissions.len();
+        let judging = self.submissions.iter().filter(|s| !s.done()).count();
+        let title = Rect {
+            x: area.x + ui::GUTTER,
+            width: area.width.saturating_sub(ui::GUTTER * 2),
+            height: 1,
+            ..area
+        };
+        let count = match judging {
+            0 => format!("{total} done"),
+            n => format!("{n} judging · {} done", total - n),
+        };
+        ui::row(
+            frame,
+            title,
+            Line::from(Span::styled(
+                "Submissions",
+                Style::new().fg(theme::muted()).bold(),
+            )),
+            Line::from(Span::styled(count, Style::new().fg(theme::faint()))),
+        );
+
+        let area = Rect {
+            y: area.y + 1,
+            height: area.height - 1,
+            ..area
+        };
         let viewport = area.height as usize;
         let max_scroll = total.saturating_sub(viewport);
         self.submission_scroll = self.submission_scroll.min(max_scroll);
@@ -257,18 +264,27 @@ impl Helper {
                 height: 1,
                 ..rows
             };
-            let (message_color, when) = match submission.finished {
-                Some(at) => (
-                    submission.tone.color(),
-                    format!("{} ago", format_elapsed(now.saturating_duration_since(at))),
-                ),
-                None => (
+            // Only a submission still being judged shows a clock.
+            let (message_color, when) = if submission.done() {
+                (submission.tone.color(), String::new())
+            } else {
+                (
                     theme::muted(),
                     format_elapsed(now.saturating_duration_since(submission.started)),
-                ),
+                )
             };
             let label = ui::truncate(&submission.label, label_width);
             let pad = label_width.saturating_sub(label.chars().count());
+            // The verdict message is not cut, but the row may be too narrow
+            // for it: then the whole submission is a double-click away.
+            let needed = 2 + label_width + 3 + submission.message.width() + 2 + when.width();
+            if label != submission.label || needed > line.width as usize {
+                ui::reveal(
+                    line,
+                    "Submission",
+                    &format!("{}\n{}", submission.label, submission.message),
+                );
+            }
             let left = Line::from(vec![
                 Span::styled(
                     format!("{} ", submission.tone.glyph(self.motion.epoch, now)),
@@ -330,6 +346,24 @@ impl Helper {
         let message_room = room.saturating_sub(anchor.width() + 2);
         let (message, elapsed) = self.status.line(message_room, self.motion.epoch, now);
         let mut message_width = message.width();
+        // The text is the span after the glyph; when it was cut, the whole
+        // message is a double-click away.
+        if let Some(notice) = self.status.current()
+            && message
+                .spans
+                .get(1)
+                .is_some_and(|text| text.content != notice.text)
+        {
+            ui::reveal(
+                Rect {
+                    x: row.x + prefix as u16,
+                    width: message_width as u16,
+                    ..row
+                },
+                "Message",
+                &notice.text,
+            );
+        }
         left.extend(message.spans);
         if !elapsed.spans.is_empty() {
             message_width += 2 + elapsed.width();
@@ -513,6 +547,32 @@ pub(in crate::helper) fn fit_keys(pairs: &[(&str, &str)], width: usize) -> Line<
         used += gap + cell_width;
     }
     Line::from(spans)
+}
+
+/// The header's wordmark: `zch` on a pill tinted with the theme's signature
+/// colour, each letter taking its own stop of the splash gradient, then the
+/// version, quiet. It echoes the splash logo in one row.
+fn wordmark() -> Vec<Span<'static>> {
+    let p = theme::p();
+    let pill = theme::paint(theme::mix(p.surface, p.signature[0], 0.22));
+    let mut spans = vec![
+        Span::styled("", Style::new().fg(pill)),
+        Span::styled(" ", Style::new().bg(pill)),
+    ];
+    for (index, letter) in ["z", "c", "h"].into_iter().enumerate() {
+        let color = theme::gradient(&p.signature, index as f32 / 2.0);
+        spans.push(Span::styled(
+            letter,
+            Style::new().fg(theme::paint(color)).bg(pill).bold(),
+        ));
+    }
+    spans.push(Span::styled(" ", Style::new().bg(pill)));
+    spans.push(Span::styled("", Style::new().fg(pill)));
+    spans.push(Span::styled(
+        format!("  v{}", env!("CARGO_PKG_VERSION")),
+        Style::new().fg(theme::faint()),
+    ));
+    spans
 }
 
 #[cfg(test)]

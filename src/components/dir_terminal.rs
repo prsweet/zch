@@ -161,7 +161,7 @@ impl DirTerminal {
                 ..row
             };
             frame.render_widget(
-                Paragraph::new(output_line(output, output_row.width as usize, now)),
+                Paragraph::new(output_line(output, output_row, now)),
                 output_row,
             );
         }
@@ -464,7 +464,8 @@ fn file_icon(is_dir: bool, name: &str) -> (&'static str, ratatui::style::Color) 
 
 /// The output row: a message with its tone's glyph, or a listing as icon +
 /// name pairs, cut off with a count of what did not fit.
-fn output_line(output: &DirOutput, width: usize, now: Instant) -> Line<'static> {
+fn output_line(output: &DirOutput, row: Rect, now: Instant) -> Line<'static> {
+    let width = row.width as usize;
     if output.entries.is_empty() {
         return Line::from(vec![
             Span::styled(
@@ -472,7 +473,7 @@ fn output_line(output: &DirOutput, width: usize, now: Instant) -> Line<'static> 
                 Style::new().fg(output.tone.color()).bold(),
             ),
             Span::styled(
-                ui::truncate(&output.text, width.saturating_sub(2)),
+                ui::truncate_revealing(&output.text, width.saturating_sub(2), row, "Output"),
                 Style::new().fg(theme::text()),
             ),
         ]);
@@ -491,6 +492,18 @@ fn output_line(output: &DirOutput, width: usize, now: Instant) -> Line<'static> 
         let note = format!("+{rest} more");
         if rest > 1 && used + cell.width() + note.width() > width {
             spans.push(Span::styled(note, Style::new().fg(theme::faint())));
+            let listing: Vec<String> = output
+                .entries
+                .iter()
+                .map(|(is_dir, name)| {
+                    if *is_dir {
+                        format!("{name}/")
+                    } else {
+                        name.clone()
+                    }
+                })
+                .collect();
+            ui::reveal(row, "Listing", &listing.join("\n"));
             break;
         }
         used += cell.width();

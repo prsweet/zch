@@ -86,20 +86,21 @@ impl Helper {
                 Tone::Progress => "·",
                 tone => tone.glyph(self.motion.epoch, now),
             };
+            let line = Rect {
+                y: body.y + row as u16,
+                height: 1,
+                ..body
+            };
             ui::row(
                 frame,
-                Rect {
-                    y: body.y + row as u16,
-                    height: 1,
-                    ..body
-                },
+                line,
                 Line::from(vec![
                     Span::styled(
                         format!("{glyph} "),
                         Style::new().fg(notice.tone.color()).bold(),
                     ),
                     Span::styled(
-                        ui::truncate(&notice.text, room),
+                        ui::truncate_revealing(&notice.text, room, line, "Message"),
                         Style::new().fg(theme::text()),
                     ),
                 ]),
@@ -121,15 +122,25 @@ impl Helper {
         let info = &pending.info;
         let body = ui::sheet(frame, area, "Submit", 68, 14, opened);
         let width = body.width.saturating_sub(12) as usize;
-        let value = |text: String| {
+        // Each field sits on its own row of the body: a cut value is a
+        // double-click away there.
+        let shown = |row: u16, label: &str, text: &str| {
+            let line = Rect {
+                y: body.y + row,
+                height: 1,
+                ..body
+            };
+            ui::truncate_revealing(text, width, line.intersection(body), label)
+        };
+        let value = |row: u16, label: &str, text: String| {
             vec![Span::styled(
-                ui::truncate(&text, width),
+                shown(row, label, &text),
                 Style::new().fg(theme::text()),
             )]
         };
-        let quiet = |text: String| {
+        let quiet = |row: u16, label: &str, text: String| {
             vec![Span::styled(
-                ui::truncate(&text, width),
+                shown(row, label, &text),
                 Style::new().fg(theme::muted()),
             )]
         };
@@ -162,7 +173,11 @@ impl Helper {
             LocalTests::NoCases => (Tone::Info, "no local cases".to_string()),
         };
         let browser = if info.safari_available {
-            quiet(format!("{} · opens in the background", info.browser))
+            quiet(
+                9,
+                "Browser",
+                format!("{} · opens in the background", info.browser),
+            )
         } else {
             vec![
                 Span::styled("✗ ", Style::new().fg(theme::error()).bold()),
@@ -179,23 +194,31 @@ impl Helper {
         tests_spans.push(Span::styled(tests, Style::new().fg(theme::text())));
 
         let lines = vec![
-            ui::field("problem", 12, value(problem)),
+            ui::field("problem", 12, value(0, "Problem", problem)),
             ui::field(
                 "target",
                 12,
-                value(format!("{} · {}", info.platform, info.problem_code)),
+                value(
+                    1,
+                    "Target",
+                    format!("{} · {}", info.platform, info.problem_code),
+                ),
             ),
-            ui::field("page", 12, quiet(info.submit_url.clone())),
-            ui::field("file", 12, value(info.file_name.clone())),
+            ui::field("page", 12, quiet(2, "Page", info.submit_url.clone())),
+            ui::field("file", 12, value(3, "File", info.file_name.clone())),
             ui::field(
                 "language",
                 12,
-                value(format!("{} · id {}", info.language, info.language_id)),
+                value(
+                    4,
+                    "Language",
+                    format!("{} · id {}", info.language, info.language_id),
+                ),
             ),
             ui::field(
                 "time limit",
                 12,
-                quiet(format_ms(u128::from(pending.time_limit))),
+                quiet(5, "Time limit", format_ms(u128::from(pending.time_limit))),
             ),
             Line::default(),
             ui::field("local tests", 12, tests_spans),
@@ -225,17 +248,24 @@ impl Helper {
             opened,
         );
         let width = body.width.saturating_sub(10) as usize;
-        let preview = |text: String| -> Vec<Span<'static>> {
+        let preview = |row: u16, label: &str, text: String| -> Vec<Span<'static>> {
             let mut lines = text.lines();
             let first = lines.next().unwrap_or("").trim().to_string();
             let more = lines.count();
             if first.is_empty() && more == 0 {
                 return vec![Span::styled("empty", Style::new().fg(theme::faint()))];
             }
-            let mut spans = vec![Span::styled(
-                ui::truncate(&first, width.saturating_sub(12)),
-                Style::new().fg(theme::text()),
-            )];
+            let line = Rect {
+                y: body.y + row,
+                height: 1,
+                ..body
+            }
+            .intersection(body);
+            let shown = ui::truncate(&first, width.saturating_sub(12));
+            if more > 0 || shown != first {
+                ui::reveal(line, label, &text);
+            }
+            let mut spans = vec![Span::styled(shown, Style::new().fg(theme::text()))];
             if more > 0 {
                 spans.push(Span::styled(
                     format!("  +{more} line{}", if more == 1 { "" } else { "s" }),
@@ -245,8 +275,16 @@ impl Helper {
             spans
         };
         let lines = vec![
-            ui::field("input", 10, preview(tc.inp_content.lines().join("\n"))),
-            ui::field("expected", 10, preview(tc.exp_content.lines().join("\n"))),
+            ui::field(
+                "input",
+                10,
+                preview(0, "Input", tc.inp_content.lines().join("\n")),
+            ),
+            ui::field(
+                "expected",
+                10,
+                preview(1, "Expected", tc.exp_content.lines().join("\n")),
+            ),
             Line::default(),
             Line::from(Span::styled(
                 "this can't be undone",

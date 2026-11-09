@@ -1,8 +1,8 @@
 //! Palettes, as semantic tokens.
 //!
-//! Three themes ship: **prsweet** (pure black and the user's Zed syntax
-//! colours), **catppuccin** (Mocha) and **obsidian** (graphite and
-//! periwinkle). Every colour in the UI is a role on the active palette —
+//! Four themes ship: **prsweet** (pure black and the user's Zed syntax
+//! colours), **catppuccin** (Mocha), **obsidian** (graphite and
+//! periwinkle) and **daylight** (the one light theme). Every colour in the UI is a role on the active palette —
 //! "the accent", "an error" — never a literal, so switching the theme in the
 //! config sheet recolours everything at once.
 //!
@@ -34,13 +34,15 @@ pub enum ThemeName {
     #[serde(alias = "mocha", alias = "Mocha", alias = "catppuccin-mocha")]
     Catppuccin,
     Obsidian,
+    Daylight,
 }
 
 impl ThemeName {
-    pub const ALL: [ThemeName; 3] = [
+    pub const ALL: [ThemeName; 4] = [
         ThemeName::Prsweet,
         ThemeName::Catppuccin,
         ThemeName::Obsidian,
+        ThemeName::Daylight,
     ];
 
     pub fn label(self) -> &'static str {
@@ -48,6 +50,7 @@ impl ThemeName {
             ThemeName::Prsweet => "prsweet",
             ThemeName::Catppuccin => "catppuccin",
             ThemeName::Obsidian => "obsidian",
+            ThemeName::Daylight => "daylight",
         }
     }
 
@@ -66,6 +69,7 @@ impl ThemeName {
             ThemeName::Prsweet => &PRSWEET,
             ThemeName::Catppuccin => &CATPPUCCIN,
             ThemeName::Obsidian => &OBSIDIAN,
+            ThemeName::Daylight => &DAYLIGHT,
         }
     }
 }
@@ -76,6 +80,11 @@ pub struct Palette {
     pub bg: Rgb,
     /// Bars that frame the screen (app bar, console, submissions).
     pub surface: Rgb,
+    /// Behind every dialog: lifted off the canvas.
+    pub card: Rgb,
+    /// Inside a case's got box: a quiet lift, so the program's answer reads
+    /// apart from the input and expected boxes beside it.
+    pub got: Rgb,
     pub border: Rgb,
     pub faint: Rgb,
     pub muted: Rgb,
@@ -101,8 +110,10 @@ pub struct Palette {
 /// punctuation instead of warm gruvbox ones.
 pub const PRSWEET: Palette = Palette {
     bg: hex(0x000000),
-    surface: hex(0x0b0d12),
-    border: hex(0x262b36),
+    surface: hex(0x10131b),
+    card: hex(0x1b1f2c),
+    got: hex(0x131824),
+    border: hex(0x30364a),
     faint: hex(0x6b7280),
     muted: hex(0x8b93a7),
     text: hex(0xedf2f7),
@@ -117,19 +128,22 @@ pub const PRSWEET: Palette = Palette {
     signature: [hex(0x2ac3de), hex(0x4fd6be), hex(0xbb9af7)],
 };
 
-/// Catppuccin Mocha.
+/// Catppuccin Mocha, layered darkest-first like the other themes: the
+/// canvas is crust, bars are mantle, and dialogs and the got box are base.
 pub const CATPPUCCIN: Palette = Palette {
-    bg: hex(0x1e1e2e),
+    bg: hex(0x11111b),
     surface: hex(0x181825),
+    card: hex(0x1e1e2e),
+    got: hex(0x1e1e2e),
     border: hex(0x313244),
-    faint: hex(0x6c7086),
+    faint: hex(0x7f849c),
     muted: hex(0xa6adc8),
     text: hex(0xcdd6f4),
     accent: hex(0x89b4fa),
     success: hex(0xa6e3a1),
     error: hex(0xf38ba8),
     warning: hex(0xf9e2af),
-    info: hex(0x94e2d5),
+    info: hex(0x74c7ec),
     modified: hex(0xfab387),
     purple: hex(0xcba6f7),
     diff: hex(0x45243a),
@@ -140,8 +154,10 @@ pub const CATPPUCCIN: Palette = Palette {
 pub const OBSIDIAN: Palette = Palette {
     bg: hex(0x090b0f),
     surface: hex(0x10141b),
-    border: hex(0x242d3a),
-    faint: hex(0x4a5668),
+    card: hex(0x161b24),
+    got: hex(0x10161d),
+    border: hex(0x2e3848),
+    faint: hex(0x5d6a7e),
     muted: hex(0x7e8a9e),
     text: hex(0xe8eef7),
     accent: hex(0x8cb8ff),
@@ -153,6 +169,29 @@ pub const OBSIDIAN: Palette = Palette {
     purple: hex(0xc8a9ff),
     diff: hex(0x3a1820),
     signature: [hex(0x6f9edd), hex(0x8cb8ff), hex(0xc8a9ff)],
+};
+
+/// The light theme: a cool off-white canvas, white dialogs and ink-dark
+/// text. Every state colour is deepened until it reads on the canvas, and
+/// the canvas reads on it (the console's mode badge puts one on the other).
+pub const DAYLIGHT: Palette = Palette {
+    bg: hex(0xf5f6f8),
+    surface: hex(0xe9ecf1),
+    card: hex(0xffffff),
+    got: hex(0xeaf0f7),
+    border: hex(0xc9d0db),
+    faint: hex(0x7c8597),
+    muted: hex(0x545d6e),
+    text: hex(0x1b2130),
+    accent: hex(0x00708f),
+    success: hex(0x346c10),
+    error: hex(0xc0233f),
+    warning: hex(0x8f5c00),
+    info: hex(0x0b6f80),
+    modified: hex(0xb0480a),
+    purple: hex(0x6f45c4),
+    diff: hex(0xfadfe5),
+    signature: [hex(0x00708f), hex(0x0b8a73), hex(0x6f45c4)],
 };
 
 #[cfg(not(test))]
@@ -198,13 +237,16 @@ pub fn bg() -> Color {
 pub fn surface() -> Color {
     paint(p().surface)
 }
-/// The tinted panel behind program output (the got pane): the bar
-/// surface lifted a touch toward the text colour.
-pub fn panel_rgb() -> Rgb {
-    mix(p().surface, p().text, 0.05)
+/// The background of every dialog: the paper the content sits on.
+pub fn card() -> Color {
+    paint(p().card)
 }
-pub fn panel() -> Color {
-    paint(panel_rgb())
+/// Inside the got box.
+pub fn got_rgb() -> Rgb {
+    p().got
+}
+pub fn got() -> Color {
+    paint(got_rgb())
 }
 pub fn border() -> Color {
     paint(p().border)
@@ -384,6 +426,47 @@ mod tests {
             ] {
                 assert_ne!(role, gruvbox);
             }
+        }
+    }
+
+    #[test]
+    fn every_theme_keeps_its_text_legible() {
+        fn luminance(Rgb(r, g, b): Rgb) -> f32 {
+            let channel = |c: u8| {
+                let c = f32::from(c) / 255.0;
+                if c <= 0.04045 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+        }
+        fn contrast(a: Rgb, b: Rgb) -> f32 {
+            let (a, b) = (luminance(a), luminance(b));
+            (a.max(b) + 0.05) / (a.min(b) + 0.05)
+        }
+        for theme in ThemeName::ALL {
+            let p = theme.palette();
+            for (role, colour) in [
+                ("text", p.text),
+                ("muted", p.muted),
+                ("accent", p.accent),
+                ("success", p.success),
+                ("error", p.error),
+                ("warning", p.warning),
+                ("info", p.info),
+            ] {
+                for (ground, under) in [("bg", p.bg), ("got", p.got), ("card", p.card)] {
+                    let ratio = contrast(colour, under);
+                    assert!(
+                        ratio >= 4.5,
+                        "{} {role} on {ground}: {ratio:.2}",
+                        theme.label()
+                    );
+                }
+            }
+            assert!(contrast(p.faint, p.bg) >= 3.0, "{} faint", theme.label());
         }
     }
 

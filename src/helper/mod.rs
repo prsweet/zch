@@ -118,7 +118,7 @@ pub struct Helper {
     run_progress: RunProgress,
     last_run: Option<RunRecord>,
     pane_dialog: Option<PaneDialog>,
-    last_pane_click: Option<(Instant, usize, PaneKind)>,
+    last_click: Option<(Instant, ClickTarget)>,
     show_help: bool,
     show_log: bool,
     /// The Normal-mode selection rail is shown once the user (or a failed
@@ -172,7 +172,7 @@ impl Helper {
             run_progress: RunProgress::default(),
             last_run: None,
             pane_dialog: None,
-            last_pane_click: None,
+            last_click: None,
             show_help: false,
             show_log: false,
             selection_visible: false,

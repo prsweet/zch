@@ -213,13 +213,14 @@ pub mod icons {
     pub const RAIL: &str = "▎";
 }
 
-/// A one-cell scrollbar: no track, a thin thumb in the border colour —
-/// present when you look for it, invisible when you don't.
+/// A one-cell scrollbar: no track, a half-block thumb in the border colour
+/// hugging the outer edge — present when you look for it, quiet when you
+/// don't.
 pub fn scrollbar(orientation: ScrollbarOrientation) -> Scrollbar<'static> {
     let thumb = if orientation.is_vertical() {
-        "┃"
+        "▐"
     } else {
-        "━"
+        "▄"
     };
     Scrollbar::new(orientation)
         .thumb_symbol(thumb)

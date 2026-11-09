@@ -176,11 +176,12 @@ pub(super) fn present_submit_result(raw: &str) -> (Tone, String) {
             for (prefix, word) in [
                 ("INTERRUPTED:", "interrupted"),
                 ("TIMED OUT:", "timed out"),
+                ("BLOCKED:", "blocked"),
                 ("ERROR:", "failed"),
                 ("UNKNOWN:", "unknown"),
             ] {
                 if let Some(rest) = raw.strip_prefix(prefix) {
-                    let tone = if word == "failed" {
+                    let tone = if matches!(word, "failed" | "blocked") {
                         Tone::Error
                     } else {
                         Tone::Warning

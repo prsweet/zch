@@ -210,18 +210,19 @@ impl ConfigMenu {
     }
 
     /// ```text
-    /// ╭ Config ──────────────────────────────╮
-    /// │  language        ‹ C++ ›              │
-    /// │                                       │
-    /// │  compile flags                3 flags │
-    /// │    -std=c++20                         │
-    /// │    -O2                                │
-    /// │  ❯ add a flag                         │
-    /// │                                       │
-    /// │  theme           ‹ prsweet ›  ●●●●●   │
-    /// │                                       │
-    /// │  submits as Codeforces language 89    │
-    /// ╰───────────────────────────────────────╯
+    /// ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+    ///    Config
+    ///
+    ///    language        ‹ C++ ›
+    ///
+    ///    compile flags                3 flags
+    ///      -std=c++20
+    ///      -O2
+    ///    ❯ add a flag
+    ///
+    ///    theme           ‹ prsweet ›  ●●●●●
+    ///
+    ///    submits as Codeforces language 89
     /// ```
     pub fn draw(&mut self, frame: &mut Frame, area: Rect, opened: f32) {
         let height = (4 + 9 + FLAG_ROWS as u16).min(area.height.saturating_sub(2));
@@ -366,7 +367,6 @@ impl ConfigMenu {
                         (DeleteStage::Select, true) => {
                             ("› ", Style::new().fg(theme::error()).bold())
                         }
-                        (_, true) if flags_active => ("› ", Style::new().fg(theme::text()).bold()),
                         _ => ("  ", Style::new().fg(theme::text())),
                     };
                     // A value that belongs to the flag above reads as its argument.
@@ -445,6 +445,32 @@ impl ConfigMenu {
             });
             frame.render_widget(&self.draft, text_area);
         }
+        // A rejected draft says why right under it, where it cannot be
+        // clipped off a short sheet.
+        if let Some(error) = &self.error
+            && y + 1 < body.bottom()
+        {
+            let row = Rect {
+                x: body.x + 4,
+                width: body.width.saturating_sub(4),
+                ..inner(y + 1)
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("✗ ", Style::new().fg(theme::error()).bold()),
+                    Span::styled(
+                        ui::truncate_revealing(
+                            error,
+                            body.width.saturating_sub(6) as usize,
+                            row,
+                            "Error",
+                        ),
+                        Style::new().fg(theme::error()),
+                    ),
+                ])),
+                row,
+            );
+        }
         y += 2;
 
         // Theme, previewed live: the whole screen is already in it.
@@ -496,28 +522,19 @@ impl ConfigMenu {
         y += 2;
 
         if y < body.bottom() {
-            let hint = match &self.error {
-                Some(error) => Line::from(vec![
-                    Span::styled("✗ ", Style::new().fg(theme::error()).bold()),
-                    Span::styled(
-                        ui::truncate(error, body.width.saturating_sub(4) as usize),
-                        Style::new().fg(theme::text()),
-                    ),
-                ]),
-                None => Line::from(vec![
-                    Span::styled(
-                        "submits as Codeforces language ",
-                        Style::new().fg(theme::faint()),
-                    ),
-                    Span::styled(
-                        self.base.cf_id(&crate::core::Toolchain {
-                            language: self.language,
-                            flags: self.flags.clone(),
-                        }),
-                        Style::new().fg(theme::muted()),
-                    ),
-                ]),
-            };
+            let hint = Line::from(vec![
+                Span::styled(
+                    "submits as Codeforces language ",
+                    Style::new().fg(theme::faint()),
+                ),
+                Span::styled(
+                    self.base.cf_id(&crate::core::Toolchain {
+                        language: self.language,
+                        flags: self.flags.clone(),
+                    }),
+                    Style::new().fg(theme::muted()),
+                ),
+            ]);
             frame.render_widget(Paragraph::new(hint), inner(y));
         }
     }
@@ -694,9 +711,15 @@ impl ConfigMenu {
         for token in raw.split_whitespace() {
             let is_value = !token.starts_with('-');
             if is_value {
+                if self.flags.iter().chain(&pending).any(|flag| flag == token) {
+                    self.error = Some(format!("{token} is already in the list"));
+                    return false;
+                }
                 if !previous.as_deref().is_some_and(takes_value) {
+                    // g++ would read a stray value as another source file.
+                    let after = previous.as_deref().unwrap_or("nothing");
                     self.error = Some(format!(
-                        "{token} is not a flag — flags start with -, or follow one that takes a value"
+                        "{token} must come right after the flag it belongs to (not {after}) — add both at once, e.g. -include-pch <path>"
                     ));
                     return false;
                 }
@@ -824,6 +847,8 @@ mod tests {
         menu.handle_key(key(KeyCode::Right));
         assert_eq!(menu.to_config().theme, ThemeName::Obsidian);
         menu.handle_key(key(KeyCode::Right));
+        assert_eq!(menu.theme, ThemeName::Daylight);
+        menu.handle_key(key(KeyCode::Right));
         assert_eq!(menu.theme, ThemeName::Prsweet);
         theme::set(ThemeName::Prsweet);
         menu.handle_key(key(KeyCode::Tab));
@@ -891,6 +916,32 @@ mod tests {
     }
 
     #[test]
+    fn a_value_is_refused_after_the_wrong_flag_and_says_why() {
+        let pch = "/usr/local/include/bits/stdc++.h.pch";
+        let mut menu = menu_with(&["-include-pch", pch, "-O0"]);
+        menu.handle_key(key(KeyCode::Tab));
+
+        // The path is already there, after -include-pch.
+        type_text(&mut menu, pch);
+        menu.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            menu.error.as_deref(),
+            Some(format!("{pch} is already in the list").as_str())
+        );
+
+        // A new value after -O0 would reach g++ as a stray source file.
+        menu.draft = TextArea::default();
+        type_text(&mut menu, "/tmp/other.pch");
+        menu.handle_key(key(KeyCode::Enter));
+        let error = menu.error.clone().unwrap_or_default();
+        assert!(error.contains("not -O0"), "{error}");
+
+        // The error shows right under the input, even on a short sheet.
+        let shown = screen(&mut menu, 80, 22);
+        assert!(shown.contains("must come right after"), "{shown}");
+    }
+
+    #[test]
     fn rejects_non_flags_and_duplicates() {
         let mut menu = menu_with(&["-O2"]);
         menu.handle_key(key(KeyCode::Tab));
@@ -901,7 +952,7 @@ mod tests {
             menu.error
                 .as_deref()
                 .unwrap_or_default()
-                .contains("flags start with -")
+                .contains("must come right after the flag")
         );
         assert_eq!(menu.flags, vec!["-O2"]);
 

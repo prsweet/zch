@@ -2,17 +2,19 @@
 //!
 //! The canvas is pure black, like the editor beside it. Structure comes from
 //! whitespace first, a single hairline where two regions meet, and one quiet
-//! rounded border around a sheet — never boxes inside boxes. Text carries
+//! bar over a sheet — never boxes inside boxes. Text carries
 //! three weights: `text` for what you read, `muted` for labels, `faint` for
 //! metadata. Colour marks exceptions (a verdict, the focus), not structure.
+
+use std::cell::RefCell;
 
 use ratatui::{
     Frame,
     buffer::Buffer,
-    layout::{Alignment, Rect},
+    layout::{Alignment, Constraint, Layout, Margin, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Widget},
+    widgets::{Block, Clear, Paragraph, Widget},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -115,6 +117,63 @@ pub fn truncate(text: &str, max: usize) -> String {
     out
 }
 
+/// Text the screen had to cut short, and where it was drawn: a double-click
+/// there opens it whole. Only cut text registers, so a double-click on text
+/// that fits does nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reveal {
+    pub area: Rect,
+    pub title: String,
+    pub text: String,
+}
+
+// Rebuilt every frame by whatever draws; one per thread so parallel tests
+// never see each other's.
+thread_local! {
+    static REVEALS: RefCell<Vec<Reveal>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Forget last frame's cut text: call before drawing, and again before a
+/// sheet so nothing under it stays clickable.
+pub fn clear_reveals() {
+    REVEALS.with(|reveals| reveals.borrow_mut().clear());
+}
+
+/// Offers `text` whole at `area`, where it was drawn cut.
+pub fn reveal(area: Rect, title: &str, text: &str) {
+    if area.is_empty() {
+        return;
+    }
+    REVEALS.with(|reveals| {
+        reveals.borrow_mut().push(Reveal {
+            area,
+            title: title.to_string(),
+            text: text.to_string(),
+        });
+    });
+}
+
+/// The cut text drawn at `position`, topmost first.
+pub fn reveal_at(position: Position) -> Option<Reveal> {
+    REVEALS.with(|reveals| {
+        reveals
+            .borrow()
+            .iter()
+            .rev()
+            .find(|reveal| reveal.area.contains(position))
+            .cloned()
+    })
+}
+
+/// [`truncate`], offering the whole text at `area` when it had to be cut.
+pub fn truncate_revealing(text: &str, max: usize, area: Rect, title: &str) -> String {
+    let shown = truncate(text, max);
+    if shown != text {
+        reveal(area, title, text);
+    }
+    shown
+}
+
 /// Dim everything already drawn: the backdrop behind a sheet. Dimming is
 /// a courtesy, not the cue — the border and the hint row say "dialog".
 pub fn dim(frame: &mut Frame, area: Rect) {
@@ -127,9 +186,10 @@ pub fn dim(frame: &mut Frame, area: Rect) {
     }
 }
 
-/// A centred sheet: rounded border, title in the top edge, padded body.
-/// `opened` is the open transition in `[0, 1]`: the border and title fade
-/// up out of the black so a dialog arrives instead of popping.
+/// A centred sheet, like an open scroll: a sheet of card colour hung from
+/// a thick bar, the title under it, then the padded body. No other edges.
+/// `opened` is the open transition in `[0, 1]`: the bar and title fade up
+/// out of the black so a dialog arrives instead of popping.
 pub fn sheet(
     frame: &mut Frame,
     area: Rect,
@@ -138,15 +198,15 @@ pub fn sheet(
     height: u16,
     opened: f32,
 ) -> Rect {
-    sheet_with(frame, area, title, theme::p().border, width, height, opened)
+    sheet_with(frame, area, title, theme::p().accent, width, height, opened)
 }
 
-/// [`sheet`] with a border tone, for destructive dialogs.
+/// [`sheet`] with a bar tone, for destructive dialogs.
 pub fn sheet_with(
     frame: &mut Frame,
     area: Rect,
     title: &str,
-    border: theme::Rgb,
+    bar: theme::Rgb,
     width: u16,
     height: u16,
     opened: f32,
@@ -167,22 +227,43 @@ pub fn sheet_with(
         height,
     };
     frame.render_widget(Clear, popup);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(theme::blend(theme::p().bg, border, opened)))
-        .title(Line::from(Span::styled(
-            format!(" {title} "),
+    let p = theme::p();
+    frame.render_widget(
+        Block::default().style(Style::new().bg(theme::card()).fg(theme::text())),
+        popup,
+    );
+    // The bar: the upper half of the first row, the card showing under it.
+    let buf = frame.buffer_mut();
+    for x in popup.left()..popup.right() {
+        buf[(x, popup.y)]
+            .set_symbol("▀")
+            .set_fg(theme::paint(theme::mix(p.card, bar, opened)));
+    }
+    let [_, title_row, _, body] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+    ])
+    .areas(popup.inner(Margin::new(SHEET_PAD, 0)));
+    frame.render_widget(
+        Span::styled(
+            truncate(title, title_row.width as usize),
             Style::new()
-                .fg(theme::blend(theme::p().faint, theme::p().text, opened))
+                .fg(theme::blend(p.faint, p.text, opened))
                 .bold(),
-        )))
-        .style(Style::new().bg(theme::bg()).fg(theme::text()))
-        .padding(Padding::new(2, 2, 1, 1));
-    let body = block.inner(popup);
-    frame.render_widget(block, popup);
-    body
+        ),
+        title_row,
+    );
+    // A blank row under the body, like the one under the title.
+    Rect {
+        height: body.height.saturating_sub(1),
+        ..body
+    }
 }
+
+/// Space left and right of a sheet's title and body.
+const SHEET_PAD: u16 = 3;
 
 /// A label/value row in a sheet: `label` muted in a fixed column.
 pub fn field(label: &str, label_width: usize, value: Vec<Span<'static>>) -> Line<'static> {
@@ -197,6 +278,29 @@ pub fn field(label: &str, label_width: usize, value: Vec<Span<'static>>) -> Line
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_cut_text_can_be_revealed() {
+        clear_reveals();
+        let area = Rect::new(4, 2, 10, 1);
+        assert_eq!(truncate_revealing("fits", 10, area, "Error"), "fits");
+        assert_eq!(reveal_at(Position::new(5, 2)), None, "nothing was cut");
+
+        let long = "this one does not fit";
+        assert_eq!(truncate_revealing(long, 10, area, "Error"), "this one …");
+        let reveal = reveal_at(Position::new(5, 2)).expect("cut text is offered");
+        assert_eq!(
+            (reveal.title.as_str(), reveal.text.as_str()),
+            ("Error", long)
+        );
+        assert_eq!(
+            reveal_at(Position::new(5, 3)),
+            None,
+            "only where it was drawn"
+        );
+        clear_reveals();
+        assert_eq!(reveal_at(Position::new(5, 2)), None);
+    }
 
     #[test]
     fn truncation_never_exceeds_display_cells() {

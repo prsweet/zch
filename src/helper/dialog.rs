@@ -1,7 +1,11 @@
-//! The large pane viewer a double-click opens: scrolling, panning and
-//! reading huge outputs page by page.
+//! The viewer a double-click opens on anything drawn cut short — a case's
+//! box or an error alike — with scrolling, panning and huge outputs read
+//! page by page. Text that fits opens nothing: there is nothing more to see.
+
+use ratatui::crossterm::event::MouseEvent;
 
 use super::*;
+use crate::components::ui;
 
 pub(super) enum DialogContent {
     Lines(Vec<Line<'static>>),
@@ -51,10 +55,19 @@ impl DialogContent {
     }
 }
 
+/// What the last click landed on, so the next one can tell a double-click.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ClickTarget {
+    Pane(usize, PaneKind),
+    Text(Rect),
+}
+
+const DOUBLE_CLICK: Duration = Duration::from_millis(450);
+
 pub(super) struct PaneDialog {
     pub(super) title: String,
-    pub(super) case_index: usize,
-    pub(super) pane: PaneKind,
+    /// The case box this shows, if it is one; any other text is a copy.
+    pub(super) source: Option<(usize, PaneKind)>,
     pub(super) content: DialogContent,
     pub(super) scroll: usize,
     pub(super) h_scroll: usize,
@@ -151,10 +164,31 @@ impl Helper {
             }
             DialogContent::Lines(lines)
         };
+        self.show_dialog(
+            format!("Case {} · {label}", index + 1),
+            Some((index, pane)),
+            content,
+        );
+    }
+
+    /// Opens the viewer on a copy of `text`.
+    pub(super) fn open_text_dialog(&mut self, title: &str, text: &str) {
+        let lines = text
+            .split('\n')
+            .map(|line| Line::from(line.to_string()))
+            .collect();
+        self.show_dialog(title.to_string(), None, DialogContent::Lines(lines));
+    }
+
+    fn show_dialog(
+        &mut self,
+        title: String,
+        source: Option<(usize, PaneKind)>,
+        content: DialogContent,
+    ) {
         self.pane_dialog = Some(PaneDialog {
-            title: format!("Case {} · {label}", index + 1),
-            case_index: index,
-            pane,
+            title,
+            source,
             content,
             scroll: 0,
             h_scroll: 0,
@@ -165,7 +199,49 @@ impl Helper {
             h_scroll_area: Rect::default(),
             h_scroll_drag: None,
         });
-        self.last_pane_click = None;
+        self.last_click = None;
+    }
+
+    /// A second click on the same cut-short text opens it whole. A box
+    /// counts only while nothing covers it and its content did not fit;
+    /// any other cut text registered itself while drawing. Returns whether
+    /// the click opened the viewer.
+    pub(super) fn open_on_double_click(&mut self, mouse: &MouseEvent) -> bool {
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return false;
+        }
+        let reveal = ui::reveal_at(Position::new(mouse.column, mouse.row));
+        let target = match &reveal {
+            Some(reveal) => Some(ClickTarget::Text(reveal.area)),
+            None if self.open_sheet().is_none()
+                && matches!(self.input_mode, InputMode::Normal | InputMode::Editing) =>
+            {
+                self.tc_list
+                    .pane_at(mouse.column, mouse.row)
+                    .filter(|(index, pane)| {
+                        self.tc_list
+                            .testcases
+                            .get(*index)
+                            .is_some_and(|tc| tc.pane_clipped(*pane))
+                    })
+                    .map(|(index, pane)| ClickTarget::Pane(index, pane))
+            }
+            None => None,
+        };
+        let double = target.is_some()
+            && self
+                .last_click
+                .is_some_and(|(at, last)| Some(last) == target && at.elapsed() < DOUBLE_CLICK);
+        self.last_click = target.map(|target| (Instant::now(), target));
+        if !double {
+            return false;
+        }
+        match (target, reveal) {
+            (Some(ClickTarget::Pane(index, pane)), _) => self.open_pane_dialog(index, pane),
+            (_, Some(reveal)) => self.open_text_dialog(&reveal.title, &reveal.text),
+            _ => return false,
+        }
+        true
     }
 
     pub(super) fn handle_pane_dialog_event(&mut self, event: Event) {

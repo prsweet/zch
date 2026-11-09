@@ -1,7 +1,7 @@
 //! Everything zch draws.
 //!
 //! ```text
-//!   ◆ zch  v2.1.0                                   ● E_Prime_Destruction    ┐ header
+//!   ◆ zch  v3.0.0                                   ● E_Prime_Destruction    ┐ header
 //!     ~ › cp › round912                                                       ┘ (surface)
 //! ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━──────────────────────────────────────────────  progress
 //!
@@ -54,6 +54,8 @@ use crate::components::{
 /// The padded header, rule and gap above the body; gap, rule and console
 /// below it.
 const CHROME_ROWS: u16 = chrome::header_rows(1) + 5;
+/// Blank rows between the submissions, when there are any, and the console.
+const FOOTER_PAD: u16 = 1;
 const MIN_WIDTH: u16 = splash::MIN_WIDTH;
 const MIN_HEIGHT: u16 = splash::MIN_HEIGHT + CHROME_ROWS;
 
@@ -82,11 +84,24 @@ fn regions(area: Rect, header_rows: u16, submission_rows: u16) -> Regions {
     let rule = row(header.bottom(), 1);
     let body_top = rule.bottom() + 1;
     let console = row(area.bottom() - 1, 1);
-    // Keep at least a few body rows; submissions shrink first.
-    let room = console.y.saturating_sub(body_top + 2 + 4);
+    // The footer, bottom up: the console, then the rule right above it.
+    // Submissions open a block between the two: a title row right under
+    // the rule, one row each, and a blank row above the console. Keep at
+    // least a few body rows: submission rows give way first, the title
+    // stays while any row does.
+    // Above the block: 4 body rows, a quiet row, the rule, the title row
+    // and the padding.
+    let room = console
+        .y
+        .saturating_sub(body_top + 4 + 1 + 1 + 1 + FOOTER_PAD);
     let submission_rows = submission_rows.min(room);
-    let submissions = row(console.y - submission_rows, submission_rows);
-    let footer_rule = row(submissions.y - 1, 1);
+    let (submissions, footer_rule) = if submission_rows > 0 {
+        let block = submission_rows + 1;
+        let submissions = row(console.y - FOOTER_PAD - block, block);
+        (submissions, row(submissions.y - 1, 1))
+    } else {
+        (row(console.y, 0), row(console.y - 1, 1))
+    };
     let body = Rect {
         x: area.x + ui::GUTTER,
         y: body_top,
@@ -157,7 +172,7 @@ impl Helper {
         ((p.done as f32 + running) / p.total as f32).clamp(0.0, 1.0)
     }
 
-    fn open_sheet(&self) -> Option<Sheet> {
+    pub(in crate::helper) fn open_sheet(&self) -> Option<Sheet> {
         if self.show_help {
             Some(Sheet::Help)
         } else if self.pane_dialog.is_some() {
@@ -179,6 +194,7 @@ impl Helper {
         let now = Instant::now();
         let area = frame.area();
         ui::canvas(frame, area);
+        ui::clear_reveals();
         self.text_regions.clear();
 
         if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
@@ -208,6 +224,10 @@ impl Helper {
         // Sheets go on top of everything, one at a time.
         let sheet = self.open_sheet();
         let opened = self.motion.sheet(sheet, now);
+        if sheet.is_some() {
+            // Only the sheet's own cut text answers a double-click.
+            ui::clear_reveals();
+        }
         let sheet_text = match sheet {
             Some(Sheet::Pane) => self.draw_pane_dialog(frame, area, opened),
             Some(Sheet::Help) => self.draw_help(frame, area, opened),
@@ -259,10 +279,12 @@ impl Helper {
                 epoch: self.motion.epoch,
                 now,
             };
-            // The list runs flush to the edge; the focus rail sits in the gutter.
+            // The list runs edge to edge: the focus rail sits in the left
+            // gutter, the cards pad themselves on the right, and the
+            // scrollbar (when needed) takes the last column of the screen.
             let list = Rect {
                 x: body.x.saturating_sub(ui::GUTTER),
-                width: body.width + ui::GUTTER,
+                width: body.width + ui::GUTTER * 2,
                 ..body
             };
             self.tc_list.draw(frame, list, focus, &look);
@@ -310,25 +332,40 @@ mod tests {
         assert_eq!(r.console, Rect::new(0, 29, 100, 1));
         assert_eq!(
             r.footer_rule.y, 28,
-            "no submissions: the rule sits on the console"
+            "no submissions: the rule sits right on the console"
         );
         assert_eq!(r.body.bottom(), 27, "one quiet row above the footer rule");
+
+        let r = regions(area, 2, 2);
+        assert_eq!(
+            r.submissions,
+            Rect::new(0, 25, 100, 3),
+            "a title and two rows"
+        );
+        assert_eq!(r.footer_rule.y, 24, "the title sits right under the rule");
     }
 
     #[test]
     fn submissions_give_way_before_the_body() {
         let r = regions(Rect::new(0, 0, 100, 30), 2, 4);
-        assert_eq!(r.submissions.height, 4);
-        assert_eq!(r.footer_rule.y, r.submissions.y - 1);
+        assert_eq!(r.submissions.height, 5, "a title and four rows");
 
-        let tight = regions(Rect::new(0, 0, 100, 15), 3, 4);
+        let tight = regions(Rect::new(0, 0, 100, 17), 3, 4);
         assert!(tight.body.height >= 4, "{tight:?}");
-        assert!(tight.submissions.height < 4, "{tight:?}");
+        assert!(tight.submissions.height < 5, "{tight:?}");
+        assert!(
+            tight.submissions.height >= 2,
+            "the title stays with a row: {tight:?}"
+        );
     }
 
     #[test]
     fn the_minimum_is_what_the_splash_needs() {
-        let r = regions(Rect::new(0, 0, MIN_WIDTH, MIN_HEIGHT), 2, 0);
+        let r = regions(
+            Rect::new(0, 0, MIN_WIDTH, MIN_HEIGHT),
+            chrome::header_rows(1),
+            0,
+        );
         assert!(r.body.height >= splash::MIN_HEIGHT, "{r:?}");
         assert!(r.body.width + ui::GUTTER * 2 >= splash::MIN_WIDTH);
     }
