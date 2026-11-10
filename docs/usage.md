@@ -4,7 +4,7 @@ Back to the [README](../README.md).
 
 ## Keys
 
-The bottom line of the screen always shows the keys for the mode you are in, and `Ctrl-H` (or `F1`) opens them as a sheet.
+The bottom line of the screen always shows the keys for the mode you are in, and `Ctrl-H` opens them as a sheet.
 
 | Key | Action |
 | --- | --- |
@@ -17,7 +17,7 @@ The bottom line of the screen always shows the keys for the mode you are in, and
 | `c` | config: language, compile flags, theme |
 | `m` | messages: everything the console said this session |
 | `Esc` | cancel a running test |
-| `Ctrl-H` / `F1` | keys for the current mode |
+| `Ctrl-H` | keys for the current mode |
 | `q` | quit (asks first while a submission is still being judged) |
 
 ## Cases

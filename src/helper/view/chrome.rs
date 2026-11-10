@@ -2,8 +2,8 @@
 
 use super::*;
 
-/// Opens help from anywhere: Ctrl-H is never text. F1 and Option-H work
-/// too, where the terminal delivers them.
+/// Opens help from anywhere: Ctrl-H is never text. Option-H works too,
+/// where the terminal delivers it.
 pub(in crate::helper) const HELP_KEY: &str = "Ctrl-H";
 
 /// Nerd Font powerline arrow: closes the mode segment into the console.

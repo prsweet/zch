@@ -7,6 +7,8 @@
 [![macOS](https://img.shields.io/badge/os-macOS-black?style=flat-square&logo=apple)](#prerequisites)
 [![Rust](https://img.shields.io/badge/rust-2024-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 
+![zch running a Codeforces problem: one case fails with the differing digits marked, the fix passes all three, then the submit sheet and the four themes](docs/demo.gif)
+
 Click Competitive Companion on a Codeforces problem and the source file opens in Zed with its samples saved. Press `r` to compile and run every sample, then `s` to submit; the verdict streams back into the same terminal. zch is a single Rust binary built with [ratatui](https://ratatui.rs/), and a keyboard-first alternative to the VS Code cph extension for people who write their solutions in Zed.
 
 ## Features
@@ -121,7 +123,7 @@ And these keys to `~/.config/zed/keymap.json`:
 | `c` | config: language, compile flags, theme |
 | `m` | message history |
 | `Esc` | cancel a running test |
-| `Ctrl-H` / `F1` | keys for the current mode |
+| `Ctrl-H` | keys for the current mode |
 | `q` | quit |
 
 The bottom line always shows the keys for the mode you are in. Editing, interactive sessions, mouse support and the limits on large output are covered in [docs/usage.md](docs/usage.md).

@@ -280,12 +280,12 @@ impl Helper {
     }
 }
 
-/// Option-H, Ctrl-H or F1: keys that are never text, so help opens from
-/// every mode, typing ones included. Without "Option as Meta", macOS
+/// Ctrl-H or Option-H: keys that are never text, so help opens from every
+/// mode, typing ones included. Without "Option as Meta", macOS
 /// terminals send Option-H as `˙`, which counts too.
 fn is_help_key(key: &ratatui::crossterm::event::KeyEvent) -> bool {
     match key.code {
-        KeyCode::F(1) | KeyCode::Char('˙') => true,
+        KeyCode::Char('˙') => true,
         KeyCode::Char('h' | 'H') => key
             .modifiers
             .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL),

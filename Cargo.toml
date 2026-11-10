@@ -3,13 +3,13 @@ name = "zch"
 version = "3.0.0"
 edition = "2024"
 repository = "https://github.com/prsweet/zch"
-description = "Codeforces and competitive programming TUI for the Zed editor: import problems from Competitive Companion, run tests with diffs, and submit from the terminal"
+description = "Competitive programming TUI for Zed: Codeforces tests and submission"
 homepage = "https://github.com/prsweet/zch"
 readme = "README.md"
 license = "MIT"
 keywords = ["codeforces", "competitive-programming", "tui", "zed", "cli"]
 categories = ["command-line-utilities", "development-tools"]
-exclude = ["/graphify-out", "/.github", "/.claude", "CLAUDE.md", "plans.md"]
+exclude = ["/graphify-out", "/.github", "/.claude", "CLAUDE.md", "plans.md", "/docs/*.gif", "/docs/*.png"]
 
 [dependencies]
 base64 = "0.22"
