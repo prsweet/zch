@@ -13,4 +13,7 @@
 ## Docs
 
 - [README](https://github.com/prsweet/zch/blob/main/README.md): features, installation, Zed tasks and keymap, keys, config, FAQ
+- [Usage](https://github.com/prsweet/zch/blob/main/docs/usage.md): keys, editing, mouse, interactive sessions, large output
+- [Configuration](https://github.com/prsweet/zch/blob/main/docs/configuration.md): config.json, checkers, environment variables
+- [Performance](https://github.com/prsweet/zch/blob/main/docs/performance.md): faster runs and precompiled headers on macOS
 - [Releases](https://github.com/prsweet/zch/releases): prebuilt binaries for Apple Silicon and Intel Macs
