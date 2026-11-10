@@ -1,12 +1,20 @@
-# 🚀 ZCH
+# zch — Codeforces & competitive programming TUI for Zed
 
-**A blazing-fast TUI dashboard for competitive programming in the [Zed](https://zed.dev/) editor on macOS.**
+**zch is a terminal dashboard for competitive programming on macOS: it imports problems from [Competitive Companion](https://github.com/jmerle/competitive-companion), runs your samples with diffs and timings, and submits to Codeforces from the [Zed](https://zed.dev/) editor.**
 
-[![macOS](https://img.shields.io/badge/os-macOS-black?style=flat-square&logo=apple)](#)
-[![Rust](https://img.shields.io/badge/rust-2024-orange?style=flat-square&logo=rust)](#)
-[![Zed](https://img.shields.io/badge/Editor-Zed-blue?style=flat-square)](#)
+[![Release](https://img.shields.io/github/v/release/prsweet/zch?style=flat-square)](https://github.com/prsweet/zch/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
+[![macOS](https://img.shields.io/badge/os-macOS-black?style=flat-square&logo=apple)](#-prerequisites)
+[![Rust](https://img.shields.io/badge/rust-2024-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
+[![Zed](https://img.shields.io/badge/editor-Zed-blue?style=flat-square)](https://zed.dev/)
 
-A single Rust binary that receives problems from the [Competitive Companion](https://github.com/jmerle/competitive-companion) extension, runs your samples with precise timings, and submits to **Codeforces** via Safari automation — all from one local TUI.
+![zch in Zed: a Codeforces problem's sample cases run in the terminal, with a wrong answer's differing characters marked](sample.png)
+
+zch is a single Rust binary built with [ratatui](https://ratatui.rs/). Click Competitive Companion on a Codeforces problem and the source file opens in Zed with its samples saved; press `r` to compile and run them all, and `s` to submit, with the verdict streaming back into the same terminal. It is a keyboard-first alternative to the VS Code cph extension for people who write their solutions in Zed.
+
+```bash
+brew install prsweet/tap/zch
+```
 
 ---
 
@@ -199,6 +207,45 @@ If Codeforces answers **403 Forbidden** (or **429** for too many requests), the 
 
 ---
 
+## ❓ FAQ
+
+### How do I use Competitive Companion with Zed?
+Run `zch` (or press `cmd-r` with the keymap below) in your problems folder. It listens on `127.0.0.1:10043`, the port Competitive Companion sends to. Click the extension on a problem page and zch creates the source file from your boilerplate, saves the sample tests, and opens the file in Zed.
+
+### Can I submit to Codeforces without leaving my editor?
+Yes. Press `s` in zch, or `cmd-enter` in Zed with the task below. zch shows a confirmation sheet, submits through Safari in the background, and streams the verdict into its submissions band. CAPTCHAs bring Safari forward; a Codeforces 403 or 429 page is reported instead of waiting forever.
+
+### Why Safari only?
+Submitting needs a browser that can run JavaScript in a background tab without stealing focus. Safari supports that natively through AppleScript ("Allow JavaScript from Apple Events"); other browsers would come to the front mid-solve.
+
+### Does zch work on Linux or Windows?
+Not yet. Running and testing are portable Rust, but submission relies on macOS Apple Events and Safari.
+
+### Which languages are supported?
+C++, Python 3 and Java. Compile flags are explicit tags you set per language; zch adds none of its own.
+
+### How do I speed up `#include <bits/stdc++.h>` on macOS?
+Precompile it and pass `-include-pch` as a flag tag. See [precompiled headers](#2-ultra-fast-precompiled-headers-pch-) below; the binary cache also skips compiling unchanged code entirely.
+
+### Is my code or login sent anywhere?
+Your code leaves your machine only when you submit, through the Safari tab you are already signed into on Codeforces. zch never asks for or stores your password, and its listener accepts connections from your own machine only.
+
+---
+
+## ⚖️ How zch compares
+
+| | **zch** | cph (VS Code extension) | cf-tool (CLI) |
+| --- | --- | --- | --- |
+| Editor | Zed (any editor via `zch send`) | VS Code | any |
+| Interface | full-screen terminal dashboard | editor side panel | one-shot commands |
+| Gets problems from | Competitive Companion | Competitive Companion | its own Codeforces parser |
+| Codeforces submit | built in (Safari) | separate browser extension | built in (HTTP login) |
+| Platform | macOS | Windows, macOS, Linux | Windows, macOS, Linux |
+
+Pick zch if you write solutions in Zed on a Mac and want testing and submission in one keyboard-driven place. On top of that it brings judge-style checkers (tokens, lines, case-insensitive, floating-point, custom testlib checkers) and live sessions for interactive problems.
+
+---
+
 ## 🧱 Architecture
 
 ```
@@ -238,8 +285,6 @@ Everything runs on one channel: the UI thread owns all state, and the receiver /
 ---
 
 ## 💡 Pro-tips for maximum performance
-
-![zch after a two-case run: one accepted, one wrong answer](sample.png)
 
 ### 1. Drop execution latency to 3-4ms ⚡
 
@@ -284,3 +329,9 @@ GCC.
 ### 3. Fast policy-based data structures (PBDS) on Clang 🌲
 
 Apple Clang doesn't ship bits/stdc++.h or PBDS. The [std-with-pbds](https://github.com/prsweet/std-with-pbds.git) helper repo sets up both for Apple Clang.
+
+---
+
+## 📄 License
+
+[MIT](LICENSE) © prsweet

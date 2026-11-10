@@ -1,0 +1,16 @@
+# zch
+
+> zch is a terminal (TUI) dashboard for competitive programming on macOS. It imports problems from the Competitive Companion browser extension, runs the sample tests with diffs, timings and memory, and submits solutions to Codeforces from the Zed editor through Safari. Written in Rust with ratatui. MIT licensed.
+
+- Install: `brew install prsweet/tap/zch`, or `curl -fsSL https://github.com/prsweet/zch/releases/latest/download/zch-installer.sh | sh`
+- Platform: macOS only (submission uses Safari and Apple Events)
+- Languages: C++, Python 3, Java
+- Listens for Competitive Companion on 127.0.0.1:10043
+- Checkers: tokens (default), lines, case-insensitive, floating-point epsilon, custom testlib-style checker
+- Zed integration: tasks call `zch send r <file>` (run) and `zch send s <file>` (submit)
+- Alternative to: the cph VS Code extension, for people who use Zed
+
+## Docs
+
+- [README](https://github.com/prsweet/zch/blob/main/README.md): features, installation, Zed tasks and keymap, keys, config, FAQ
+- [Releases](https://github.com/prsweet/zch/releases): prebuilt binaries for Apple Silicon and Intel Macs
