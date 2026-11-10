@@ -17,8 +17,6 @@ use crate::components::{
 
 /// Per-frame context the list passes down to its cases.
 pub struct ListLook {
-    /// Show the Normal-mode selection rail.
-    pub selection: bool,
     /// `Some` while a run is active: the case running now, if any (`None`
     /// while compiling).
     pub running: Option<Option<usize>>,
@@ -30,7 +28,6 @@ impl ListLook {
     #[cfg(test)]
     pub fn idle(now: Instant) -> Self {
         Self {
-            selection: false,
             running: None,
             epoch: now,
             now,
@@ -232,7 +229,6 @@ impl TestCaseList {
                 number: idx + 1,
                 focus: case_focus,
                 active_box,
-                selected: look.selection && idx == self.active_area,
                 state,
                 epoch: look.epoch,
                 now: look.now,

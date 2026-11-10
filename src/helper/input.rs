@@ -74,10 +74,10 @@ impl Helper {
                         self.stop_session();
                     }
                     KeyCode::Esc => {
-                        // Esc steps back one layer: a text selection, an
-                        // alert, then the selected case.
-                        if self.text_selection.take().is_none() && !self.status.dismiss() {
-                            self.selection_visible = false;
+                        // Esc steps back one layer: a text selection, then an
+                        // alert.
+                        if self.text_selection.take().is_none() {
+                            self.status.dismiss();
                         }
                     }
                     KeyCode::Char('q') => {
@@ -240,18 +240,6 @@ impl Helper {
                 }
                 if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                     self.submissions_scrollbar_drag = None;
-                }
-
-                if self.input_mode == InputMode::Normal
-                    && let MouseEventKind::Down(MouseButton::Left) = mouse.kind
-                    && self.tc_list.testcases.iter().any(|tc| {
-                        tc.area
-                            .rect
-                            .contains(Position::new(mouse.column, mouse.row))
-                    })
-                {
-                    // A click picks the case, like j/k would.
-                    self.selection_visible = true;
                 }
 
                 let over_submissions = self

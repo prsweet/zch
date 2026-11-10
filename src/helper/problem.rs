@@ -154,7 +154,6 @@ impl Helper {
         }
         self.active_problem = Some(problem);
         self.adding_case = false;
-        self.selection_visible = false;
         self.cancel_run();
         // A new problem starts on a clean status line; the previous run's
         // result no longer describes what is on screen.

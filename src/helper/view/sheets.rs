@@ -368,7 +368,7 @@ impl Helper {
             .min(total_lines.saturating_sub(body.height as usize));
         sync_paged_page(&mut dialog.content, tc_list, dialog.scroll);
 
-        let content_width = dialog.content.max_width();
+        let content_width = dialog.content_width();
         let mut vscroll = total_lines > body.height as usize;
         let mut usable_width = body.width.saturating_sub(u16::from(vscroll) * 2);
         let mut hscroll = content_width > usable_width as usize;
@@ -393,28 +393,7 @@ impl Helper {
         let scroll = dialog.scroll;
         let h_scroll = dialog.h_scroll;
         sync_paged_page(&mut dialog.content, tc_list, scroll);
-        let (display_lines, local_scroll) = match &dialog.content {
-            DialogContent::Lines(lines) => (lines.clone(), scroll),
-            DialogContent::Paged {
-                page_start,
-                page,
-                warning,
-                ..
-            } => {
-                let warning_rows = usize::from(*warning);
-                let mut display = Vec::new();
-                if *warning && *page_start == 0 {
-                    display.push(paged_warning_line(PAGED_OUTPUT_NOTE));
-                }
-                display.extend(page.iter().cloned());
-                let base = if *page_start == 0 {
-                    0
-                } else {
-                    warning_rows + *page_start
-                };
-                (display, scroll.saturating_sub(base))
-            }
-        };
+        let display_lines = dialog.visible(scroll, content_height as usize);
 
         let content_area = Rect {
             width: usable_width,
@@ -424,10 +403,7 @@ impl Helper {
         frame.render_widget(
             Paragraph::new(Text::from(display_lines))
                 .style(Style::new().fg(theme::text()))
-                .scroll((
-                    local_scroll.min(u16::MAX as usize) as u16,
-                    h_scroll.min(u16::MAX as usize) as u16,
-                )),
+                .scroll((0, h_scroll.min(u16::MAX as usize) as u16)),
             content_area,
         );
 

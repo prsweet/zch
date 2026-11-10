@@ -274,7 +274,6 @@ impl Helper {
                 _ => CaseFocus::None,
             };
             let look = ListLook {
-                selection: self.selection_visible && self.input_mode == InputMode::Normal,
                 running: self.running.then_some(self.run_progress.current),
                 epoch: self.motion.epoch,
                 now,

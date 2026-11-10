@@ -121,9 +121,6 @@ pub struct Helper {
     last_click: Option<(Instant, ClickTarget)>,
     show_help: bool,
     show_log: bool,
-    /// The Normal-mode selection rail is shown once the user (or a failed
-    /// run) has picked a case; before that nothing is marked.
-    selection_visible: bool,
     adding_case: bool,
     session: Option<InteractiveSession>,
     next_session_id: u64,
@@ -175,7 +172,6 @@ impl Helper {
             last_click: None,
             show_help: false,
             show_log: false,
-            selection_visible: false,
             adding_case: false,
             listener: Listener::Up(crate::core::receiver::listen_port()),
             motion: view::Motion::new(),

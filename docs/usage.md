@@ -38,7 +38,6 @@ Accepted cases fold to their header; click `+` / `-` on a header to fold or unfo
 
 ## Mouse
 
-- **Click** a case to select it.
 - **Double-click** anything shown cut short to read it whole: a case box whose content does not fit, a capped output, a config error, a console message, a submission or a file listing. Text that already fits opens nothing.
 - In that viewer, scroll with the wheel, `↑` / `↓`, `←` / `→` and `PgUp` / `PgDn`, or drag either scrollbar. `Esc` closes it.
 - **Drag** across text inside a panel to select it; releasing copies it to the clipboard.

@@ -314,8 +314,8 @@ impl Helper {
         if failed > 0
             && let Some(idx) = first_failure
         {
+            // Bring the first failure into view.
             self.tc_list.active_area = idx;
-            self.selection_visible = true;
             self.tc_list.update_scroll();
         }
     }

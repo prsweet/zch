@@ -31,8 +31,6 @@ pub struct CaseView {
     pub number: usize,
     pub focus: CaseFocus,
     pub active_box: ActiveBox,
-    /// The keyboard selection in Normal mode.
-    pub selected: bool,
     pub state: RunState,
     pub epoch: Instant,
     pub now: Instant,
@@ -675,19 +673,20 @@ impl TestCase {
             ..area
         };
 
+        // Every card has a rail, quiet as the box frames; the case your
+        // keys act on lights its own (the accent while editing, red when
+        // picked for deletion). It is always there, so nothing shifts when
+        // the mode changes.
         let rail = match view.focus {
-            CaseFocus::Edit => Some(theme::accent()),
-            CaseFocus::Delete => Some(theme::error()),
-            CaseFocus::None if view.selected => Some(theme::accent()),
-            CaseFocus::None => None,
+            CaseFocus::Edit => theme::accent(),
+            CaseFocus::Delete => theme::error(),
+            CaseFocus::None => theme::border(),
         };
-        if let Some(rail) = rail {
-            // Exactly as tall as the card: never into the gap below it.
-            for y in card.top()..card.bottom() {
-                buf[(area.x, y)]
-                    .set_symbol(icons::RAIL)
-                    .set_style(Style::new().fg(rail));
-            }
+        // Exactly as tall as the card: never into the gap below it.
+        for y in card.top()..card.bottom() {
+            buf[(area.x, y)]
+                .set_symbol(icons::RAIL)
+                .set_style(Style::new().fg(rail));
         }
 
         self.draw_header(buf, Rect { height: 1, ..area }, view);
@@ -697,13 +696,12 @@ impl TestCase {
 
         let input_rows = self.input_lines() as u16;
         let output_rows = self.output_rows() as u16;
-        let box_x = area.x + CONTENT_INDENT;
-        let box_width = area.width.saturating_sub(CONTENT_INDENT + CARD_PAD_RIGHT);
+        let box_x = area.x + LABEL_START;
+        let box_width = area.width.saturating_sub(LABEL_START + CARD_PAD_RIGHT);
         let half = box_width.saturating_sub(BOX_GAP) / 2;
 
         // Each pane is open at the top and right: a left edge and a floor
-        // frame it.
-        // Its label sits in the gutter beside its first line. Expected and
+        // frame it, and its label sits in its top padding row. Expected and
         // got share a row of boxes.
         let frame_rows = BOX_PAD_Y * 2 + 1;
         self.input_box.rect = Rect {
@@ -741,14 +739,14 @@ impl TestCase {
             verdict => theme::paint(verdict.rgb()),
         };
         pane_box(buf, got_box, got_frame, Some(theme::got()));
-        gutter_label(buf, area.x, input_box.y + BOX_PAD_Y, "inp", input_active);
-        gutter_label(
-            buf,
-            area.x,
-            expected_box.y + BOX_PAD_Y,
-            "exp",
-            expected_active,
-        );
+        // Got needs no name: its fill and verdict-coloured frame say it.
+        let boxes = [
+            (self.input_box.rect, "inp", input_active),
+            (self.expected_box.rect, "exp", expected_active),
+        ];
+        for (rect, label, active) in boxes {
+            box_label(buf, rect, area, label, active);
+        }
 
         let [input_text, expected_text, got_text] = self.text_regions();
         // A box being typed into scrolls instead; the rest are cut when their
@@ -793,7 +791,6 @@ impl TestCase {
         let number_style = match view.focus {
             CaseFocus::Delete => Style::new().fg(theme::error()).bold(),
             CaseFocus::Edit => Style::new().fg(theme::text()).bold(),
-            CaseFocus::None if view.selected => Style::new().fg(theme::text()).bold(),
             CaseFocus::None => Style::new().fg(theme::muted()),
         };
         let chevron = if self.collapsed {
@@ -1175,46 +1172,47 @@ fn pane_box(buf: &mut Buffer, rect: Rect, frame: Color, fill: Option<Color>) {
 
 /// A pane label in the first column, right-aligned under the case number.
 /// The pane being edited gets the accent.
-fn gutter_label(buf: &mut Buffer, card_x: u16, y: u16, label: &str, active: bool) {
+/// A box's name in its top padding row, against its right edge; skipped
+/// when that row is scrolled out of `visible`.
+fn box_label(buf: &mut Buffer, rect: Rect, visible: Rect, label: &str, active: bool) {
     let style = if active {
         Style::new().fg(theme::accent()).bold()
     } else {
         Style::new().fg(theme::faint())
     };
-    let width = label.chars().count().min(LABEL_COLUMN as usize) as u16;
-    // Right-aligned to the label column, like the case number above it.
-    let x = card_x + LABEL_START + LABEL_COLUMN - width;
-    Paragraph::new(Span::styled(label.to_string(), style)).render(
-        Rect {
-            x,
-            y,
-            width,
-            height: 1,
-        },
-        buf,
-    );
+    let row = Rect {
+        x: rect.x + 1 + BOX_PAD_X,
+        width: rect.width.saturating_sub(1 + BOX_PAD_X * 2),
+        height: 1,
+        ..rect
+    };
+    if row.width == 0 || row.intersection(visible) != row {
+        return;
+    }
+    Paragraph::new(Span::styled(label.to_string(), style))
+        .alignment(ratatui::layout::Alignment::Right)
+        .render(row, buf);
 }
 /// The header and the gap under it, the floor and padding of the input box
 /// and of the expected/got boxes, and the gap after the card.
 const CARD_CHROME_ROWS: usize = 1 + HEADER_GAP as usize + 2 * (1 + 2 * BOX_PAD_Y as usize) + 1;
-/// The card is two columns: labels (`01`, `inp`, `exp`) right-aligned in
-/// the first, the verdict and the boxes left-aligned in the second, with
-/// the same gap between them on every row:
+/// The rail, then a cell, then the case number and the boxes' left edge,
+/// each box naming itself in its top row:
 ///
 /// ```text
-/// ▎  01  wrong answer                 4 ms -
-/// ▎ inp  ║ 5
-/// ▎      ╚═════════════════════════════════
+/// ▎  01           wrong answer            4 ms -
+/// ▎
+/// ▎ ▐                                     inp
+/// ▎ ▐  5
+/// ▎ ▐
+/// ▎ ▝▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
 /// ```
-///
-/// The rail, then a cell, then the label column.
 const LABEL_START: u16 = 2;
-/// Wide enough for `exp` and a three-digit case number.
-const LABEL_COLUMN: u16 = 3;
+/// Wide enough for a three-digit case number.
+const LABEL_COLUMN: u16 = 2;
+/// Between the case number and the verdict.
 const COLUMN_GAP: u16 = 2;
-/// Where the second column (the verdict, the boxes) starts.
-const CONTENT_INDENT: u16 = LABEL_START + LABEL_COLUMN + COLUMN_GAP;
-/// Room right of the boxes, matching the room left of the labels.
+/// Room right of the boxes, matching the room left of them.
 const CARD_PAD_RIGHT: u16 = LABEL_START;
 pub(crate) const OUTPUT_TRUNCATED_NOTE: &str = "… output truncated";
 const DIFF_SKIPPED_NOTE: &str = "… diff skipped for large output";
@@ -1572,14 +1570,13 @@ mod tests {
         assert_eq!(tc.row_height(), full);
     }
 
-    fn view(focus: CaseFocus, active_box: ActiveBox, selected: bool, state: RunState) -> CaseView {
+    fn view(focus: CaseFocus, active_box: ActiveBox, state: RunState) -> CaseView {
         // A reveal that finished long ago: colours are at rest.
         let now = Instant::now() + std::time::Duration::from_secs(5);
         CaseView {
             number: 1,
             focus,
             active_box,
-            selected,
             state,
             epoch: now,
             now,
@@ -1602,28 +1599,29 @@ mod tests {
 
         let (buffer, _) = draw(
             &mut tc,
-            &view(CaseFocus::None, ActiveBox::None, false, RunState::Idle),
-        );
-        assert_eq!(
-            buffer[(0, 0)].symbol(),
-            " ",
-            "a verdict alone draws no rail"
-        );
-
-        let (buffer, _) = draw(
-            &mut tc,
-            &view(CaseFocus::None, ActiveBox::None, true, RunState::Idle),
+            &view(CaseFocus::None, ActiveBox::None, RunState::Idle),
         );
         assert_eq!(buffer[(0, 0)].symbol(), icons::RAIL);
         assert_eq!(
             buffer[(0, 0)].fg,
-            theme::accent(),
-            "selection is the accent"
+            theme::border(),
+            "in Normal mode every rail is quiet"
         );
+        assert_eq!(
+            tc.input_box.rect.x, LABEL_START,
+            "the boxes keep their place with or without the rail"
+        );
+
+        let (buffer, _) = draw(
+            &mut tc,
+            &view(CaseFocus::Edit, ActiveBox::Input, RunState::Idle),
+        );
+        assert_eq!(buffer[(0, 0)].symbol(), icons::RAIL);
+        assert_eq!(buffer[(0, 0)].fg, theme::accent(), "editing is the accent");
 
         let (buffer, title) = draw(
             &mut tc,
-            &view(CaseFocus::Delete, ActiveBox::None, false, RunState::Idle),
+            &view(CaseFocus::Delete, ActiveBox::None, RunState::Idle),
         );
         assert_eq!(
             buffer[(0, 0)].fg,
@@ -1658,7 +1656,7 @@ mod tests {
             tc.set_result(verdict, "0".into());
             let (buffer, title) = draw(
                 &mut tc,
-                &view(CaseFocus::None, ActiveBox::None, false, RunState::Idle),
+                &view(CaseFocus::None, ActiveBox::None, RunState::Idle),
             );
             let x = title
                 .find(word)
@@ -1679,7 +1677,7 @@ mod tests {
         let fresh = CaseView {
             now,
             epoch: now,
-            ..view(CaseFocus::None, ActiveBox::None, false, RunState::Idle)
+            ..view(CaseFocus::None, ActiveBox::None, RunState::Idle)
         };
         let (buffer, title) = draw(&mut tc, &fresh);
         let x = title.find("wrong answer").unwrap() as u16;
@@ -1695,17 +1693,17 @@ mod tests {
         let mut tc = TestCase::new("1", "2");
         let (_, title) = draw(
             &mut tc,
-            &view(CaseFocus::None, ActiveBox::None, false, RunState::Running),
+            &view(CaseFocus::None, ActiveBox::None, RunState::Running),
         );
         assert!(title.contains("running"), "{title}");
         let (_, title) = draw(
             &mut tc,
-            &view(CaseFocus::None, ActiveBox::None, false, RunState::Queued),
+            &view(CaseFocus::None, ActiveBox::None, RunState::Queued),
         );
         assert!(title.contains("queued"), "{title}");
         let (_, title) = draw(
             &mut tc,
-            &view(CaseFocus::None, ActiveBox::None, false, RunState::Idle),
+            &view(CaseFocus::None, ActiveBox::None, RunState::Idle),
         );
         assert!(
             !title.contains("running") && !title.contains("queued"),
@@ -1720,26 +1718,30 @@ mod tests {
         tc.collapsed = false;
         let (buffer, _) = draw(
             &mut tc,
-            &view(CaseFocus::Edit, ActiveBox::Input, false, RunState::Idle),
+            &view(CaseFocus::Edit, ActiveBox::Input, RunState::Idle),
         );
-        // Labels are right-aligned under the case number: "inp" at 2..5.
+        // Each label sits inside its box, in the top row, against the
+        // right edge of its text.
         let input = tc.input_box.rect;
-        let first_line = input.y + BOX_PAD_Y;
+        let [input_text, expected_text, got_text] = tc.text_regions();
+        let label_at = |text: Rect, y: u16, label: &str| (text.right() - label.len() as u16, y);
+        let at = label_at(input_text, input.y, "inp");
+        assert_eq!(buffer[at].symbol(), "i");
         assert_eq!(
-            buffer[(LABEL_START, first_line)].symbol(),
-            "i",
-            "beside the first line"
-        );
-        let label_end = 4;
-        assert_eq!(
-            buffer[(label_end, first_line)].fg,
+            buffer[at].fg,
             theme::accent(),
             "the active pane's label is the accent"
         );
         let expected = tc.expected_box.rect;
-        assert_eq!(
-            buffer[(label_end, expected.y + BOX_PAD_Y)].fg,
-            theme::faint()
+        let at = label_at(expected_text, expected.y, "exp");
+        assert_eq!(buffer[at].symbol(), "e");
+        assert_eq!(buffer[at].fg, theme::faint());
+        let got_row = got_text.right() - 3..got_text.right();
+        assert!(
+            got_row
+                .into_iter()
+                .all(|x| buffer[(x, tc.got_box.rect.y)].symbol() == " "),
+            "got has no label"
         );
         let frame = FRAME.to_border_set();
         let floor = input.bottom() - 1;
@@ -1768,7 +1770,7 @@ mod tests {
         tc.collapsed = false;
         let (buffer, _) = draw(
             &mut tc,
-            &view(CaseFocus::None, ActiveBox::None, false, RunState::Idle),
+            &view(CaseFocus::None, ActiveBox::None, RunState::Idle),
         );
         let screen: Vec<String> = (0..buffer.area.height)
             .map(|y| {
@@ -1780,8 +1782,10 @@ mod tests {
         let text = screen.join("\n");
         let edge = FRAME.to_border_set().vertical_left;
         for word in [
-            format!("inp  {edge}  5"),
-            format!("exp  {edge}  10"),
+            "inp".to_string(),
+            format!("{edge}  5"),
+            "exp".to_string(),
+            format!("{edge}  10"),
             " 01 ".to_string(),
         ] {
             assert!(text.contains(&word), "{word} missing:\n{text}");
@@ -1791,8 +1795,6 @@ mod tests {
         let at = header.find("wrong answer").expect("verdict") as i32;
         let centre = (header.chars().count() as i32 - "wrong answer".len() as i32) / 2;
         assert!((at - centre).abs() <= 2, "{header}");
-        // Got has no label: its fill and verdict-coloured frame set it apart.
-        assert!(!text.contains("got"), "{text}");
         assert!(!text.contains('╭') && !text.contains('╰'), "{text}");
         let (got, expected) = (tc.got_box.rect, tc.expected_box.rect);
         assert_eq!(buffer[(got.x + 1, got.y)].bg, theme::got(), "got is tinted");
@@ -1811,7 +1813,7 @@ mod tests {
         assert_eq!(buffer[(got_text.x, got_text.y)].symbol(), "0");
         assert_eq!(
             tc.text_regions()[0].x,
-            CONTENT_INDENT + 1 + BOX_PAD_X,
+            LABEL_START + 1 + BOX_PAD_X,
             "text starts inside the box border and its padding"
         );
     }
@@ -2031,7 +2033,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
         let area = Rect::new(0, 0, 80, tc.row_height() as u16);
-        let look = view(CaseFocus::None, ActiveBox::None, false, RunState::Idle);
+        let look = view(CaseFocus::None, ActiveBox::None, RunState::Idle);
         terminal
             .draw(|frame| tc.draw_tc(frame.buffer_mut(), area, &look))
             .unwrap();

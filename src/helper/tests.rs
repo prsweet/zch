@@ -925,8 +925,10 @@ fn successful_cases_do_not_churn_the_console() {
     helper.run_finished(helper.run_id, 1240);
     assert_eq!(console_text(&helper), "1 of 2 failed · 1.24 s");
     assert_eq!(helper.status.tone(), Some(Tone::Error));
-    assert!(helper.selection_visible, "the first failure is selected");
-    assert_eq!(helper.tc_list.active_area, 1);
+    assert_eq!(
+        helper.tc_list.active_area, 1,
+        "the first failure is brought into view"
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -2071,7 +2073,7 @@ fn screens_render_at_the_floor_and_wide() {
     std::fs::create_dir_all(work.join("round912")).unwrap();
     std::fs::write(work.join("A.cpp"), "").unwrap();
 
-    let sizes = [(48u16, 24u16), (100, 30)];
+    let sizes = [(crate::components::splash::MIN_WIDTH, 24u16), (100, 30)];
     let check = |helper: &mut Helper, label: &str| {
         for (width, height) in sizes {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -2222,6 +2224,35 @@ fn a_cut_error_opens_whole_on_a_double_click() {
     helper.handle_event(key(KeyCode::Esc));
     assert!(helper.pane_dialog.is_none());
     assert_eq!(helper.input_mode, InputMode::Config);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_long_output_draws_only_the_rows_on_screen() {
+    let root = temp_root("long_dialog");
+    let fs_ops = FsOps::with_root(root.clone());
+    let work = root.join("problems");
+    std::fs::create_dir_all(&work).unwrap();
+
+    let mut helper = Helper::new(work, &fs_ops);
+    let text: Vec<String> = (0..20_000).map(|n| format!("line {n}")).collect();
+    helper.open_text_dialog("Output", &text.join("\n"));
+    let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+    terminal.draw(|f| helper.draw(f)).unwrap();
+
+    let dialog = helper.pane_dialog.as_mut().unwrap();
+    let rows = dialog.viewport as usize;
+    let shown = dialog.visible(12_345, rows);
+    assert_eq!(shown.len(), rows, "exactly one screenful");
+    assert_eq!(shown[0].to_string(), "line 12345");
+
+    // Scrolled to the end, the last line is on screen.
+    helper.set_pane_dialog_scroll(usize::MAX);
+    terminal.draw(|f| helper.draw(f)).unwrap();
+    let screen = screen_text(&terminal);
+    assert!(screen.contains("line 19999"), "{screen}");
+    assert!(!screen.contains("line 0\n"));
 
     let _ = std::fs::remove_dir_all(&root);
 }

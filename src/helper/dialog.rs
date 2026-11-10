@@ -77,6 +77,55 @@ pub(super) struct PaneDialog {
     pub(super) v_scroll_drag: Option<ScrollbarDrag>,
     pub(super) h_scroll_area: Rect,
     pub(super) h_scroll_drag: Option<ScrollbarDrag>,
+    /// The widest line and the page it was measured on: measuring every
+    /// line on every frame made scrolling a large output lag.
+    width_cache: Option<(usize, usize)>,
+}
+
+impl PaneDialog {
+    /// The widest line, measured once per page instead of once per frame.
+    pub(super) fn content_width(&mut self) -> usize {
+        let page = match &self.content {
+            DialogContent::Lines(_) => 0,
+            DialogContent::Paged { page_start, .. } => *page_start,
+        };
+        if let Some((measured, width)) = self.width_cache
+            && measured == page
+        {
+            return width;
+        }
+        let width = self.content.max_width();
+        self.width_cache = Some((page, width));
+        width
+    }
+
+    /// The lines on screen: `rows` of them from `scroll`. Only these are
+    /// handed to the renderer, so a frame costs the same however long the
+    /// output is.
+    pub(super) fn visible(&self, scroll: usize, rows: usize) -> Vec<Line<'static>> {
+        match &self.content {
+            DialogContent::Lines(lines) => lines.iter().skip(scroll).take(rows).cloned().collect(),
+            DialogContent::Paged {
+                page_start,
+                page,
+                warning,
+                ..
+            } => {
+                let note =
+                    (*warning && *page_start == 0).then(|| paged_warning_line(PAGED_OUTPUT_NOTE));
+                let base = if *page_start == 0 {
+                    0
+                } else {
+                    usize::from(*warning) + *page_start
+                };
+                note.into_iter()
+                    .chain(page.iter().cloned())
+                    .skip(scroll.saturating_sub(base))
+                    .take(rows)
+                    .collect()
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -198,6 +247,7 @@ impl Helper {
             v_scroll_drag: None,
             h_scroll_area: Rect::default(),
             h_scroll_drag: None,
+            width_cache: None,
         });
         self.last_click = None;
     }
@@ -303,15 +353,16 @@ impl Helper {
                         return;
                     }
 
-                    let horizontal = self.pane_dialog.as_ref().and_then(|dialog| {
-                        dialog.h_scroll_area.contains(position).then_some((
-                            dialog.h_scroll_area,
-                            dialog
-                                .content
-                                .max_width()
-                                .saturating_sub(dialog.viewport_width.max(1) as usize),
-                            dialog.h_scroll,
-                        ))
+                    let horizontal = self.pane_dialog.as_mut().and_then(|dialog| {
+                        dialog.h_scroll_area.contains(position).then(|| {
+                            (
+                                dialog.h_scroll_area,
+                                dialog
+                                    .content_width()
+                                    .saturating_sub(dialog.viewport_width.max(1) as usize),
+                                dialog.h_scroll,
+                            )
+                        })
                     });
                     if let Some((area, max_scroll, scroll)) = horizontal {
                         if let Some((drag, scroll)) =
@@ -379,8 +430,7 @@ impl Helper {
             return;
         };
         let max = dialog
-            .content
-            .max_width()
+            .content_width()
             .saturating_sub(dialog.viewport_width.max(1) as usize);
         dialog.h_scroll = (dialog.h_scroll as i64 + columns as i64).clamp(0, max as i64) as usize;
     }
