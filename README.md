@@ -1,4 +1,4 @@
-# zch
+# zch - competitive programming helper for Zed
 
 **zch is a terminal dashboard for competitive programming in the [Zed](https://zed.dev/) editor on macOS. It imports problems from [Competitive Companion](https://github.com/jmerle/competitive-companion), runs your samples with diffs and timings, and submits to Codeforces without leaving your editor.**
 
