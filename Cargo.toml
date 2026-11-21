@@ -1,13 +1,13 @@
 [package]
 name = "zch"
-version = "3.0.0"
+version = "3.1.0"
 edition = "2024"
 repository = "https://github.com/prsweet/zch"
 description = "Competitive programming TUI for Zed: Codeforces tests and submission"
 homepage = "https://github.com/prsweet/zch"
 readme = "README.md"
 license = "MIT"
-keywords = ["codeforces", "competitive-programming", "tui", "zed", "cli"]
+keywords = ["codeforces", "competitive-coding", "tui", "zed", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 exclude = ["/graphify-out", "/.github", "/.claude", "CLAUDE.md", "plans.md", "/docs/*.gif", "/docs/*.png"]
 

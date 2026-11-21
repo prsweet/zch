@@ -13,7 +13,7 @@ The bottom line of the screen always shows the keys for the mode you are in, and
 | `e` | edit cases |
 | `x` | delete a case |
 | `s` | submit to Codeforces |
-| `d` | directory console: `cd <path>`, `ls`, `pwd` |
+| `d` | directory console: `cd <path>`, `ls`, `pwd`, `mkdir <path>`, `rm [-r] [-f] <path>` |
 | `c` | config: language, compile flags, theme |
 | `m` | messages: everything the console said this session |
 | `Esc` | cancel a running test |
@@ -70,7 +70,11 @@ Only one run is active at a time. Editing, deleting or receiving a new problem c
 
 ## Directory console
 
-`d` opens a one-line console for `cd <path>`, `ls` and `pwd`. `Tab` completes and cycles through matches, and `↑` / `↓` recall earlier commands. New problems are saved in the current directory.
+`d` opens a one-line console for `cd <path>`, `ls`, `pwd` `mkdir <path>` (which creates missing parents too, and stays in the current folder) and `rm [-r] [-f] <path>…`.
+
+`rm` deletes for good; nothing goes to the Trash. Files go at once. A folder needs `-r`, and then a sheet shows what will go and how many items are inside: `Enter` removes, `Esc` keeps. `rm` refuses your home folder and any folder that holds the current one (`.`, `..`, `/`), and if any path is wrong it removes nothing; `-f` skips missing paths instead. Paths with spaces aren't supported by `rm`.
+
+As you type, the command word takes the theme's colour when the console knows it and its red when it doesn't, like the fish shell. `Tab` completes and cycles through matches, and `↑` / `↓` recall earlier commands. New problems are saved in the current directory.
 
 Problems whose names clean up to the same filename (`A. Sum` exists in every contest) get a short suffix from their URL, so their tests and binaries never overwrite each other.
 

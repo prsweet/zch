@@ -1,9 +1,11 @@
-//! The working-directory console (`d`): `cd`, `ls`, `pwd`.
+//! The working-directory console (`d`): `cd`, `ls`, `pwd`, `mkdir`, `rm`.
 //!
 //! It lives in the header, under the app bar: the folder breadcrumb turns
 //! into a command line in place, and command output (`ls`, completions,
 //! errors) takes the row beneath it — never the run console, so a directory
-//! listing can't be mistaken for a verdict.
+//! listing can't be mistaken for a verdict. `mkdir` and `rm` are the
+//! exception: they change the disk, so their result is a notice for the
+//! console, like "config saved".
 
 use std::{
     fs,
@@ -17,7 +19,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Paragraph},
+    widgets::Paragraph,
 };
 use ratatui_textarea::TextArea;
 use unicode_width::UnicodeWidthStr;
@@ -39,10 +41,35 @@ pub struct DirOutput {
 }
 
 struct Completion {
+    /// Everything before the path being completed: `cd `, `rm -r a.cpp `.
+    head: String,
     dir_part: String,
-    matches: Vec<String>,
+    /// `(is_dir, name)`.
+    matches: Vec<(bool, String)>,
     next: usize,
 }
+
+/// An `rm` of a folder, waiting for `Enter` before anything is deleted.
+struct PendingRemoval {
+    targets: Vec<RemovalTarget>,
+    /// What the console reports once they are gone.
+    done: String,
+}
+
+/// One path an `rm` is waiting to delete, as the confirmation shows it.
+pub struct RemovalTarget {
+    path: PathBuf,
+    /// As typed, without a trailing `/`.
+    pub name: String,
+    pub is_dir: bool,
+    /// Files and folders inside, up to [`COUNT_LIMIT`].
+    pub inside: usize,
+}
+
+/// The commands the console runs, so the command word can be coloured as
+/// it is typed.
+const COMMANDS: [&str; 5] = ["cd", "ls", "pwd", "mkdir", "rm"];
+const PLACEHOLDER: &str = "cd <path>   ls   pwd   mkdir <name>   rm [-r] <path>";
 
 pub struct DirTerminal {
     pub cur_dir: PathBuf,
@@ -50,6 +77,9 @@ pub struct DirTerminal {
     pub output: Option<DirOutput>,
     /// When the directory last changed, so the header can acknowledge it.
     pub changed_at: Option<Instant>,
+    /// A result for the console, collected with [`DirTerminal::take_notice`].
+    notice: Option<(Tone, String)>,
+    removal: Option<PendingRemoval>,
     history: Vec<String>,
     history_cursor: Option<usize>,
     completion: Option<Completion>,
@@ -62,6 +92,8 @@ impl DirTerminal {
             input_area: TextArea::default(),
             output: None,
             changed_at: None,
+            notice: None,
+            removal: None,
             history: Vec::new(),
             history_cursor: None,
             completion: None,
@@ -82,6 +114,15 @@ impl DirTerminal {
             text: String::new(),
             entries,
         });
+    }
+
+    fn notify(&mut self, tone: Tone, text: impl Into<String>) {
+        self.notice = Some((tone, text.into()));
+    }
+
+    /// The last command's console notice, if it left one.
+    pub fn take_notice(&mut self) -> Option<(Tone, String)> {
+        self.notice.take()
     }
 
     pub fn clear_output(&mut self) {
@@ -135,16 +176,11 @@ impl DirTerminal {
                 width: row.width.saturating_sub(crumbs_width + 4),
                 ..row
             };
-            self.input_area.set_block(Block::default());
-            self.input_area.set_style(Style::new().fg(theme::text()));
-            self.input_area
-                .set_cursor_style(Style::new().add_modifier(Modifier::REVERSED));
-            self.input_area.set_cursor_line_style(Style::new());
-            self.input_area.set_placeholder_text("cd <path>   ls   pwd");
-            self.input_area
-                .set_placeholder_style(Style::new().fg(theme::faint()));
             if input.width > 0 {
-                frame.render_widget(&self.input_area, input);
+                frame.render_widget(
+                    Paragraph::new(self.command_line(input.width as usize)),
+                    input,
+                );
             }
         } else {
             frame.render_widget(
@@ -167,7 +203,86 @@ impl DirTerminal {
         }
     }
 
+    /// The typed command, coloured like fish: the command word in the
+    /// theme's command colour when the console knows it and its error red
+    /// when it does not, the rest in the reading
+    /// colour, the cursor a reversed cell. A line wider than the box scrolls
+    /// to keep the cursor in view.
+    fn command_line(&self, width: usize) -> Line<'static> {
+        let cursor_style = Style::new().add_modifier(Modifier::REVERSED);
+        let text: Vec<char> = self
+            .input_area
+            .lines()
+            .first()
+            .map(|line| line.chars().collect())
+            .unwrap_or_default();
+        if text.is_empty() {
+            let placeholder = ui::truncate(PLACEHOLDER, width);
+            let mut chars = placeholder.chars();
+            let first = chars.next().map(String::from).unwrap_or_default();
+            return Line::from(vec![
+                Span::styled(first, cursor_style.fg(theme::faint())),
+                Span::styled(chars.collect::<String>(), Style::new().fg(theme::faint())),
+            ]);
+        }
+
+        let word_end = text
+            .iter()
+            .position(|c| c.is_whitespace())
+            .unwrap_or(text.len());
+        let word: String = text[..word_end].iter().collect();
+        let word_style = Style::new().fg(if COMMANDS.contains(&word.as_str()) {
+            theme::command()
+        } else {
+            theme::error()
+        });
+        let rest_style = Style::new().fg(theme::text());
+
+        let cursor = self.input_area.cursor().1;
+        let start = (cursor + 1).saturating_sub(width);
+        let spans: Vec<Span<'static>> = (start..text.len().max(cursor + 1))
+            .take(width)
+            .map(|index| {
+                let style = if index < word_end {
+                    word_style
+                } else {
+                    rest_style
+                };
+                let style = if index == cursor {
+                    style.add_modifier(Modifier::REVERSED)
+                } else {
+                    style
+                };
+                Span::styled(text.get(index).copied().unwrap_or(' ').to_string(), style)
+            })
+            .collect();
+        Line::from(spans)
+    }
+
+    /// What an `rm` waiting for confirmation would delete.
+    pub fn removal(&self) -> Option<&[RemovalTarget]> {
+        self.removal
+            .as_ref()
+            .map(|removal| removal.targets.as_slice())
+    }
+
     pub fn handle_event(&mut self, key: KeyEvent) -> bool {
+        // A folder removal waits on its sheet: Enter deletes, Esc keeps.
+        // Esc only cancels, so it does not also close the console.
+        if let Some(removal) = self.removal.take() {
+            match key.code {
+                KeyCode::Enter => {
+                    let paths: Vec<PathBuf> =
+                        removal.targets.iter().map(|t| t.path.clone()).collect();
+                    self.remove(&paths, &removal.done);
+                }
+                KeyCode::Esc | KeyCode::Backspace | KeyCode::Char('n') => {
+                    self.notify(Tone::Info, "nothing removed");
+                }
+                _ => self.removal = Some(removal),
+            }
+            return false;
+        }
         match key.code {
             KeyCode::Enter => {
                 self.execute();
@@ -213,13 +328,8 @@ impl DirTerminal {
                 std::env::var_os("HOME")
                     .map(PathBuf::from)
                     .unwrap_or_else(|| self.cur_dir.clone())
-            } else if let Some(rest) = target.strip_prefix("~/") {
-                match std::env::var_os("HOME") {
-                    Some(home) => PathBuf::from(home).join(rest),
-                    None => self.cur_dir.join(target),
-                }
             } else {
-                self.cur_dir.join(target)
+                self.resolve(target)
             };
 
             match new_path.canonicalize() {
@@ -257,21 +367,178 @@ impl DirTerminal {
             }
         } else if cmd == "pwd" {
             self.say(Tone::Info, self.cur_dir.display().to_string());
+        } else if cmd == "mkdir" || cmd.starts_with("mkdir ") {
+            self.make_dir(cmd[5..].trim());
+        } else if cmd == "rm" || cmd.starts_with("rm ") {
+            self.remove_command(&cmd[2..]);
         } else {
             self.say(
                 Tone::Warning,
-                format!("unknown command — {cmd} (try cd, ls or pwd)"),
+                format!("unknown command — {cmd} (try cd, ls, pwd, mkdir or rm)"),
             );
         }
+    }
+
+    /// `rm [-r] [-f] <path>…`: files go at once; a folder needs `-r` and an
+    /// `Enter` to confirm, since nothing here goes to the Trash. A folder
+    /// that holds the current one, and the home folder, are refused. If any
+    /// path is wrong, nothing is removed.
+    fn remove_command(&mut self, args: &str) {
+        let (mut recursive, mut force) = (false, false);
+        let mut targets = Vec::new();
+        for arg in args.split_whitespace() {
+            match arg.strip_prefix('-').filter(|flags| !flags.is_empty()) {
+                Some(flags) => {
+                    for flag in flags.chars() {
+                        match flag {
+                            'r' | 'R' => recursive = true,
+                            'f' => force = true,
+                            other => {
+                                self.notify(
+                                    Tone::Warning,
+                                    format!("unknown option -{other} — rm takes -r and -f"),
+                                );
+                                return;
+                            }
+                        }
+                    }
+                }
+                None => targets.push(arg),
+            }
+        }
+        if targets.is_empty() {
+            self.notify(Tone::Warning, "rm needs a path — rm [-r] <path>");
+            return;
+        }
+
+        let home = std::env::var_os("HOME").and_then(|home| fs::canonicalize(home).ok());
+        let current = fs::canonicalize(&self.cur_dir).unwrap_or_else(|_| self.cur_dir.clone());
+        let mut paths = Vec::new();
+        let mut names = Vec::new();
+        let mut folders = Vec::new();
+        for target in targets {
+            let path = self.resolve(target);
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                if force {
+                    continue;
+                }
+                self.notify(Tone::Error, format!("no such file or folder — {target}"));
+                return;
+            };
+            // A link is removed itself, never what it points to.
+            if meta.is_dir() {
+                if !recursive {
+                    self.notify(Tone::Error, format!("{target} is a folder — use rm -r"));
+                    return;
+                }
+                let canonical = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                if current.starts_with(&canonical) {
+                    self.notify(
+                        Tone::Error,
+                        format!("refusing to remove {target} — it holds the current folder"),
+                    );
+                    return;
+                }
+                if home.as_ref() == Some(&canonical) {
+                    self.notify(Tone::Error, "refusing to remove your home folder");
+                    return;
+                }
+                folders.push((target, count_entries(&path)));
+            }
+            paths.push(path);
+            names.push(target);
+        }
+
+        let done = match paths.len() {
+            0 => {
+                self.notify(Tone::Info, "nothing to remove");
+                return;
+            }
+            1 if folders.is_empty() => format!("removed {}", args_name(&paths[0])),
+            1 => format!("removed {}/", folders[0].0.trim_end_matches('/')),
+            count => format!("removed {count} items"),
+        };
+        if folders.is_empty() {
+            self.remove(&paths, &done);
+            return;
+        }
+        let targets = paths
+            .into_iter()
+            .zip(names)
+            .map(|(path, name)| {
+                let folder = folders.iter().find(|(folder, _)| *folder == name);
+                RemovalTarget {
+                    path,
+                    name: name.trim_end_matches('/').to_string(),
+                    is_dir: folder.is_some(),
+                    inside: folder.map_or(0, |(_, count)| *count),
+                }
+            })
+            .collect();
+        self.removal = Some(PendingRemoval { targets, done });
+    }
+
+    fn remove(&mut self, paths: &[PathBuf], done: &str) {
+        for path in paths {
+            let is_dir = fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir());
+            let removed = if is_dir {
+                fs::remove_dir_all(path)
+            } else {
+                fs::remove_file(path)
+            };
+            if let Err(e) = removed {
+                self.notify(
+                    Tone::Error,
+                    format!("cannot remove {} — {e}", args_name(path)),
+                );
+                return;
+            }
+        }
+        self.notify(Tone::Success, done);
+    }
+
+    /// `mkdir <path>`: creates the folder and any missing parents, like
+    /// `mkdir -p`, but refuses one that already exists so a typo can't pass
+    /// silently. It stays in the current folder; `cd` moves.
+    fn make_dir(&mut self, target: &str) {
+        if target.is_empty() {
+            self.notify(Tone::Warning, "mkdir needs a name — mkdir <path>");
+            return;
+        }
+        let path = self.resolve(target);
+        if path.exists() {
+            let what = if path.is_dir() { "folder" } else { "file" };
+            self.notify(Tone::Error, format!("a {what} already exists — {target}"));
+            return;
+        }
+        match fs::create_dir_all(&path) {
+            Ok(()) => self.notify(Tone::Success, format!("created {target}")),
+            Err(e) => self.notify(Tone::Error, format!("cannot create {target} — {e}")),
+        }
+    }
+
+    /// A typed path, against the current folder unless it is absolute or
+    /// starts at `~/`.
+    fn resolve(&self, target: &str) -> PathBuf {
+        if let Some(rest) = target.strip_prefix("~/")
+            && let Some(home) = std::env::var_os("HOME")
+        {
+            return PathBuf::from(home).join(rest);
+        }
+        self.cur_dir.join(target)
     }
 
     fn autocomplete(&mut self) {
         // Repeated Tab presses cycle through every match after the first press
         // completed the common prefix.
         if let Some(completion) = self.completion.take() {
-            let name = completion.matches[completion.next].clone();
+            let (is_dir, name) = &completion.matches[completion.next];
             let next = (completion.next + 1) % completion.matches.len();
-            self.set_input(&format!("cd {}{name}/", completion.dir_part));
+            let slash = if *is_dir { "/" } else { "" };
+            self.set_input(&format!(
+                "{}{}{name}{slash}",
+                completion.head, completion.dir_part
+            ));
             self.show_matches(&completion.matches, &completion.dir_part);
             self.completion = Some(Completion { next, ..completion });
             return;
@@ -279,9 +546,22 @@ impl DirTerminal {
 
         let line = self.input_area.lines().join("");
 
-        let Some(prefix) = line.strip_prefix("cd ") else {
+        // `mkdir` completes the existing folders of the path it extends; `rm`
+        // completes files too, in whichever of its arguments is last.
+        let (head, prefix, with_files) = if line.starts_with("rm ") {
+            let split = line.rfind(' ').map_or(0, |index| index + 1);
+            (&line[..split], &line[split..], true)
+        } else if let Some(command) = ["cd ", "mkdir "]
+            .into_iter()
+            .find(|command| line.starts_with(command))
+        {
+            (command, &line[command.len()..], false)
+        } else {
             return;
         };
+        if prefix.starts_with('-') {
+            return;
+        }
 
         // Split the typed path into the directory to search and the fragment
         // being completed: "cp/qu" → ("cp/", "qu"); "quis" → ("", "quis").
@@ -311,11 +591,19 @@ impl DirTerminal {
         };
 
         let needle = fragment.to_lowercase();
-        let mut matches: Vec<String> = entries
+        let mut matches: Vec<(bool, String)> = entries
             .flatten()
-            .filter(|entry| entry.path().is_dir())
-            .map(|entry| entry.file_name().to_string_lossy().to_string())
-            .filter(|name| name.to_lowercase().starts_with(&needle))
+            .map(|entry| {
+                (
+                    entry.path().is_dir(),
+                    entry.file_name().to_string_lossy().to_string(),
+                )
+            })
+            .filter(|(is_dir, name)| {
+                (*is_dir || with_files)
+                    && name.to_lowercase().starts_with(&needle)
+                    && (!name.starts_with('.') || fragment.starts_with('.'))
+            })
             .collect();
         matches.sort();
 
@@ -323,16 +611,20 @@ impl DirTerminal {
             return;
         }
 
-        let extension = common_extension(&matches);
-        self.set_input(&format!("cd {dir_part}{extension}"));
+        let names: Vec<String> = matches.iter().map(|(_, name)| name.clone()).collect();
+        let extension = common_extension(&names);
+        self.set_input(&format!("{head}{dir_part}{extension}"));
         self.history_cursor = None;
 
-        if matches.len() == 1 {
-            self.input_area.insert_str("/");
+        if let [(is_dir, _)] = matches.as_slice() {
+            if *is_dir {
+                self.input_area.insert_str("/");
+            }
             self.clear_output();
         } else {
             self.show_matches(&matches, dir_part);
             self.completion = Some(Completion {
+                head: head.to_string(),
                 dir_part: dir_part.to_string(),
                 matches,
                 next: 0,
@@ -340,11 +632,11 @@ impl DirTerminal {
         }
     }
 
-    fn show_matches(&mut self, matches: &[String], dir_part: &str) {
+    fn show_matches(&mut self, matches: &[(bool, String)], dir_part: &str) {
         self.list(
             matches
                 .iter()
-                .map(|name| (true, format!("{dir_part}{name}")))
+                .map(|(is_dir, name)| (*is_dir, format!("{dir_part}{name}")))
                 .collect(),
         );
     }
@@ -443,7 +735,7 @@ fn breadcrumb(path: &Path, width: usize, glow: f32) -> Line<'static> {
 }
 
 /// A file's icon and colour, by what kind of file it is.
-fn file_icon(is_dir: bool, name: &str) -> (&'static str, ratatui::style::Color) {
+pub fn file_icon(is_dir: bool, name: &str) -> (&'static str, ratatui::style::Color) {
     if is_dir {
         return (icons::FOLDER, theme::accent());
     }
@@ -518,6 +810,38 @@ fn output_line(output: &DirOutput, row: Rect, now: Instant) -> Line<'static> {
         ));
     }
     Line::from(spans)
+}
+
+/// How many folder confirmations count up to before saying "N+".
+pub const COUNT_LIMIT: usize = 10_000;
+
+/// Files and folders under `path`, stopping at [`COUNT_LIMIT`].
+fn count_entries(path: &Path) -> usize {
+    let mut count = 0;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            count += 1;
+            if count >= COUNT_LIMIT {
+                return count;
+            }
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                stack.push(entry.path());
+            }
+        }
+    }
+    count
+}
+
+/// A path as the console names it: its last component.
+fn args_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().to_string(),
+    )
 }
 
 /// The longest prefix shared by every match (case-insensitively), rendered
@@ -602,6 +926,163 @@ mod tests {
 
         run(&mut dir, "frobnicate");
         assert_eq!(dir.output.as_ref().unwrap().tone, Tone::Warning);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn mkdir_creates_nested_folders_and_refuses_existing_ones() {
+        let root = temp_dir("mkdir");
+        fs::write(root.join("A.cpp"), "").unwrap();
+        let mut dir = DirTerminal::new(root.clone());
+
+        run(&mut dir, "mkdir round912/div2");
+        assert!(root.join("round912/div2").is_dir());
+        assert_eq!(
+            dir.take_notice(),
+            Some((Tone::Success, "created round912/div2".to_string()))
+        );
+        assert!(dir.output.is_none(), "the result goes to the console");
+        assert_eq!(dir.cur_dir, root, "mkdir does not move");
+
+        run(&mut dir, "mkdir round912");
+        assert_eq!(
+            dir.take_notice(),
+            Some((
+                Tone::Error,
+                "a folder already exists — round912".to_string()
+            ))
+        );
+
+        run(&mut dir, "mkdir A.cpp");
+        assert_eq!(
+            dir.take_notice(),
+            Some((Tone::Error, "a file already exists — A.cpp".to_string()))
+        );
+
+        run(&mut dir, "mkdir");
+        assert_eq!(dir.take_notice().map(|(tone, _)| tone), Some(Tone::Warning));
+
+        dir.input_area.insert_str("mkdir rou");
+        dir.handle_event(tab());
+        assert_eq!(typed(&dir), "mkdir round912/", "mkdir completes parents");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rm_removes_files_at_once_and_folders_after_enter() {
+        let root = temp_dir("rm");
+        fs::write(root.join("A.cpp"), "").unwrap();
+        fs::write(root.join("B.cpp"), "").unwrap();
+        fs::create_dir_all(root.join("round912/div2")).unwrap();
+        fs::write(root.join("round912/C.cpp"), "").unwrap();
+        let mut dir = DirTerminal::new(root.clone());
+
+        run(&mut dir, "rm A.cpp");
+        assert!(!root.join("A.cpp").exists());
+        assert_eq!(
+            dir.take_notice(),
+            Some((Tone::Success, "removed A.cpp".to_string()))
+        );
+
+        run(&mut dir, "rm round912");
+        assert_eq!(
+            dir.take_notice(),
+            Some((Tone::Error, "round912 is a folder — use rm -r".to_string()))
+        );
+
+        run(&mut dir, "rm -rf round912/");
+        assert!(root.join("round912").exists(), "a folder waits for Enter");
+        let targets = dir.removal().expect("the sheet is waiting");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].name, "round912");
+        assert!(targets[0].is_dir);
+        assert_eq!(targets[0].inside, 2);
+        dir.handle_event(key(KeyCode::Char('x')));
+        assert!(dir.removal().is_some(), "other keys leave the sheet open");
+        assert!(
+            !dir.handle_event(key(KeyCode::Esc)),
+            "Esc keeps the console open"
+        );
+        assert!(dir.removal().is_none());
+        assert!(root.join("round912").exists());
+        assert_eq!(
+            dir.take_notice(),
+            Some((Tone::Info, "nothing removed".to_string()))
+        );
+
+        run(&mut dir, "rm -rf round912");
+        dir.handle_event(key(KeyCode::Enter));
+        assert!(!root.join("round912").exists());
+        assert_eq!(
+            dir.take_notice(),
+            Some((Tone::Success, "removed round912/".to_string()))
+        );
+
+        run(&mut dir, "rm B.cpp nowhere.cpp");
+        assert!(
+            root.join("B.cpp").exists(),
+            "one wrong path removes nothing"
+        );
+        assert_eq!(dir.take_notice().map(|(tone, _)| tone), Some(Tone::Error));
+        run(&mut dir, "rm -f B.cpp nowhere.cpp");
+        assert!(!root.join("B.cpp").exists(), "-f skips missing paths");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn command_word_takes_the_theme_colour_when_known_and_red_when_not() {
+        let mut dir = DirTerminal::new(std::env::temp_dir());
+        let color = |dir: &DirTerminal| dir.command_line(40).spans[0].style.fg;
+
+        dir.input_area.insert_str("mkdir round912");
+        assert_eq!(color(&dir), Some(theme::command()));
+        dir.set_input("mkdi");
+        assert_eq!(color(&dir), Some(theme::error()), "half a command is red");
+        dir.set_input("rmdir x");
+        assert_eq!(color(&dir), Some(theme::error()));
+
+        let shown: String = dir
+            .command_line(40)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(shown, "rmdir x ", "the cursor cell follows the text");
+    }
+
+    #[test]
+    fn rm_refuses_the_folders_holding_the_current_one() {
+        let root = temp_dir("rm_guard");
+        fs::create_dir_all(root.join("cp")).unwrap();
+        let mut dir = DirTerminal::new(root.join("cp").canonicalize().unwrap());
+
+        for command in ["rm -rf .", "rm -rf ..", "rm -rf /"] {
+            run(&mut dir, command);
+            let (tone, text) = dir.take_notice().unwrap();
+            assert_eq!(tone, Tone::Error, "{command}");
+            assert!(
+                text.contains("holds the current folder"),
+                "{command}: {text}"
+            );
+        }
+        assert!(root.join("cp").exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rm_completes_files_as_well_as_folders() {
+        let root = temp_dir("rm_complete");
+        fs::write(root.join("Alpha.cpp"), "").unwrap();
+        fs::create_dir_all(root.join("round912")).unwrap();
+        let mut dir = DirTerminal::new(root.clone());
+
+        dir.input_area.insert_str("rm -r round912 Al");
+        dir.handle_event(tab());
+        assert_eq!(typed(&dir), "rm -r round912 Alpha.cpp");
+
         let _ = fs::remove_dir_all(&root);
     }
 

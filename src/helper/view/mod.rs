@@ -184,6 +184,9 @@ impl Helper {
                 InputMode::Config => Some(Sheet::Config),
                 InputMode::ConfirmSubmit => Some(Sheet::Submit),
                 InputMode::ConfirmDelete => Some(Sheet::Delete),
+                InputMode::Directory if self.dir_terminal.removal().is_some() => {
+                    Some(Sheet::Remove)
+                }
                 InputMode::ConfirmQuit => Some(Sheet::Quit),
                 _ => None,
             }
@@ -238,6 +241,7 @@ impl Helper {
             }
             Some(Sheet::Submit) => self.draw_submit_sheet(frame, area, opened),
             Some(Sheet::Delete) => self.draw_delete_sheet(frame, area, opened),
+            Some(Sheet::Remove) => self.draw_remove_sheet(frame, area, opened),
             Some(Sheet::Quit) => self.draw_quit_sheet(frame, area, opened),
             None => Rect::default(),
         };

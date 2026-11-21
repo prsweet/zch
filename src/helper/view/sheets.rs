@@ -295,6 +295,87 @@ impl Helper {
         body
     }
 
+    /// `rm` on a folder: what goes, how much is inside, and that it is for
+    /// good. The keys are on the console beneath.
+    pub(in crate::helper) fn draw_remove_sheet(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        opened: f32,
+    ) -> Rect {
+        const SHOWN: usize = 4;
+        let Some(targets) = self.dir_terminal.removal() else {
+            return Rect::default();
+        };
+        let title = match targets {
+            [target] if target.is_dir => format!("Remove {}/", target.name),
+            [target] => format!("Remove {}", target.name),
+            _ => format!("Remove {} items", targets.len()),
+        };
+        let rows = targets.len().min(SHOWN) + usize::from(targets.len() > SHOWN);
+        let body = ui::sheet_with(
+            frame,
+            area,
+            &title,
+            theme::p().error,
+            56,
+            7 + rows as u16,
+            opened,
+        );
+        let width = body.width as usize;
+        let mut lines: Vec<Line> = targets
+            .iter()
+            .take(SHOWN)
+            .enumerate()
+            .map(|(row, target)| {
+                let (icon, color) =
+                    crate::components::dir_terminal::file_icon(target.is_dir, &target.name);
+                let inside = match (target.is_dir, target.inside) {
+                    (false, _) => String::new(),
+                    (true, 0) => "empty".to_string(),
+                    (true, 1) => "1 item inside".to_string(),
+                    (true, n) if n >= crate::components::dir_terminal::COUNT_LIMIT => {
+                        format!(
+                            "{}+ items inside",
+                            crate::components::dir_terminal::COUNT_LIMIT
+                        )
+                    }
+                    (true, n) => format!("{n} items inside"),
+                };
+                let slash = if target.is_dir { "/" } else { "" };
+                let name = format!("{}{slash}", target.name);
+                let line = Rect {
+                    y: body.y + row as u16,
+                    height: 1,
+                    ..body
+                }
+                .intersection(body);
+                let room = width.saturating_sub(inside.width() + 6);
+                Line::from(vec![
+                    Span::styled(format!("{icon} "), Style::new().fg(color)),
+                    Span::styled(
+                        ui::truncate_revealing(&name, room, line, "Path"),
+                        Style::new().fg(theme::text()),
+                    ),
+                    Span::styled(format!("  {inside}"), Style::new().fg(theme::faint())),
+                ])
+            })
+            .collect();
+        if targets.len() > SHOWN {
+            lines.push(Line::from(Span::styled(
+                format!("+{} more", targets.len() - SHOWN),
+                Style::new().fg(theme::faint()),
+            )));
+        }
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(
+            "deleted for good — nothing goes to the Trash",
+            Style::new().fg(theme::muted()),
+        )));
+        frame.render_widget(Paragraph::new(lines), body);
+        body
+    }
+
     pub(in crate::helper) fn draw_quit_sheet(
         &self,
         frame: &mut Frame,

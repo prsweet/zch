@@ -155,6 +155,14 @@ impl Helper {
                     if self.dir_terminal.handle_event(key) {
                         self.input_mode = InputMode::Normal;
                     }
+                    if let Some((tone, text)) = self.dir_terminal.take_notice() {
+                        match tone {
+                            Tone::Success => self.status.success(text),
+                            Tone::Warning => self.status.warn(text),
+                            Tone::Error => self.status.error(text),
+                            _ => self.status.info(text),
+                        }
+                    }
                 }
                 InputMode::Config => {
                     if self.config_menu.handle_key(Event::Key(key)) {

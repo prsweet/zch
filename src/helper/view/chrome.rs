@@ -418,6 +418,9 @@ impl Helper {
             InputMode::Editing => (format!("EDIT {}", position()), p.success),
             InputMode::DeleteSelect => (format!("DELETE {}", position()), p.error),
             InputMode::ConfirmDelete => ("DELETE".to_string(), p.error),
+            InputMode::Directory if self.dir_terminal.removal().is_some() => {
+                ("REMOVE".to_string(), p.error)
+            }
             InputMode::Directory => ("CONSOLE".to_string(), p.info),
             InputMode::Config => ("CONFIG".to_string(), p.warning),
             InputMode::ConfirmSubmit => ("SUBMIT".to_string(), p.purple),
@@ -496,6 +499,9 @@ impl Helper {
                 ("Esc", "cancel"),
             ],
             InputMode::ConfirmDelete => vec![("Enter", "delete"), ("Esc", "back")],
+            InputMode::Directory if self.dir_terminal.removal().is_some() => {
+                vec![("Enter", "remove"), ("Esc", "keep")]
+            }
             InputMode::Directory => vec![
                 ("Enter", "run"),
                 ("Tab", "complete"),

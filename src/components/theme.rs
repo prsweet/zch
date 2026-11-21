@@ -98,6 +98,8 @@ pub struct Palette {
     pub modified: Rgb,
     /// Submissions and other "out in the world" states.
     pub purple: Rgb,
+    /// A command the directory console knows, as it is typed.
+    pub command: Rgb,
     /// Background behind characters that differ in a wrong answer.
     pub diff: Rgb,
     /// The wordmark's colour sweep, left to right.
@@ -124,6 +126,7 @@ pub const PRSWEET: Palette = Palette {
     info: hex(0x7dcfff),
     modified: hex(0xff9e64),
     purple: hex(0xbb9af7),
+    command: hex(0x2ac3de),
     diff: hex(0x3d0f1a),
     signature: [hex(0x2ac3de), hex(0x4fd6be), hex(0xbb9af7)],
 };
@@ -146,6 +149,7 @@ pub const CATPPUCCIN: Palette = Palette {
     info: hex(0x74c7ec),
     modified: hex(0xfab387),
     purple: hex(0xcba6f7),
+    command: hex(0xcba6f7),
     diff: hex(0x45243a),
     signature: [hex(0x89b4fa), hex(0xcba6f7), hex(0xf5c2e7)],
 };
@@ -167,6 +171,7 @@ pub const OBSIDIAN: Palette = Palette {
     info: hex(0x7fe0cd),
     modified: hex(0xffa66f),
     purple: hex(0xc8a9ff),
+    command: hex(0x8cb8ff),
     diff: hex(0x3a1820),
     signature: [hex(0x6f9edd), hex(0x8cb8ff), hex(0xc8a9ff)],
 };
@@ -190,6 +195,7 @@ pub const DAYLIGHT: Palette = Palette {
     info: hex(0x0b6f80),
     modified: hex(0xb0480a),
     purple: hex(0x6f45c4),
+    command: hex(0x00708f),
     diff: hex(0xfadfe5),
     signature: [hex(0x00708f), hex(0x0b8a73), hex(0x6f45c4)],
 };
@@ -274,6 +280,9 @@ pub fn info() -> Color {
 }
 pub fn purple() -> Color {
     paint(p().purple)
+}
+pub fn command() -> Color {
+    paint(p().command)
 }
 pub fn diff() -> Color {
     paint(p().diff)
@@ -456,6 +465,7 @@ mod tests {
                 ("error", p.error),
                 ("warning", p.warning),
                 ("info", p.info),
+                ("command", p.command),
             ] {
                 for (ground, under) in [("bg", p.bg), ("got", p.got), ("card", p.card)] {
                     let ratio = contrast(colour, under);

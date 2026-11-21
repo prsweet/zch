@@ -1,7 +1,10 @@
 # Changelog
 
-## Unreleased
+## 3.1.0
 
+- `mkdir <path>` in the directory console (`d`), with parents created as needed and `Tab` completion.
+- `rm [-r] [-f] <path>…` in the directory console: folders ask on a sheet first, and the current folder's parents and your home folder are refused.
+- The directory console colours the command word as you type: the theme's colour for a known command, its red when not.
 - Help is `Ctrl-H` only; the undocumented `F1` alias is gone.
 - Shorter package description, so the Homebrew formula passes `brew style`.
 - A demo GIF at the top of the README.

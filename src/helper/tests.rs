@@ -2256,3 +2256,42 @@ fn a_long_output_draws_only_the_rows_on_screen() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn rm_of_a_folder_asks_on_a_sheet() {
+    let root = temp_root("rm_sheet");
+    let fs_ops = FsOps::with_root(root.clone());
+    let work = root.join("problems");
+    std::fs::create_dir_all(work.join("round912/div2")).unwrap();
+    std::fs::write(work.join("round912/A.cpp"), "").unwrap();
+
+    let mut helper = Helper::new(work.clone(), &fs_ops);
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    helper.handle_event(key(KeyCode::Char('d')));
+    type_text(&mut helper, "rm -r round912");
+    terminal.draw(|frame| helper.draw(frame)).unwrap();
+    dump_screen(&terminal);
+    helper.handle_event(key(KeyCode::Enter));
+
+    assert!(helper.dir_terminal.removal().is_some(), "the sheet is open");
+    terminal.draw(|frame| helper.draw(frame)).unwrap();
+    dump_screen(&terminal);
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(screen.contains("Remove round912/"));
+    assert!(screen.contains("2 items inside"));
+    assert!(work.join("round912").exists());
+
+    helper.handle_event(key(KeyCode::Enter));
+    assert!(!work.join("round912").exists());
+    assert!(helper.dir_terminal.removal().is_none());
+    assert!(matches!(helper.input_mode, InputMode::Directory));
+    assert_eq!(helper.status.tone(), Some(Tone::Success));
+
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -119,7 +119,7 @@ And these keys to `~/.config/zed/keymap.json`:
 | `r` | compile and run every case |
 | `a` / `e` / `x` | add / edit / delete cases |
 | `s` | submit to Codeforces |
-| `d` | directory console (`cd`, `ls`, `pwd`) |
+| `d` | directory console (`cd`, `ls`, `pwd`, `mkdir`, `rm`) |
 | `c` | config: language, compile flags, theme |
 | `m` | message history |
 | `Esc` | cancel a running test |

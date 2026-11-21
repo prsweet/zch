@@ -11,6 +11,7 @@ pub(in crate::helper) enum Sheet {
     Config,
     Submit,
     Delete,
+    Remove,
     Quit,
     Pane,
 }
